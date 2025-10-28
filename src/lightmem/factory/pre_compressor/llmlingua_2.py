@@ -44,13 +44,26 @@ class LlmLingua2Compressor:
                 'context': [mes['content']],
                 **self.config.compress_config  # compress_config['rate']=0.8 compress_config['target_token']=-1
             }
-            comp_content = self._compressor.compress_prompt(**compress_config)['compressed_prompt']
-            while tokenizer is not None and len(tokenizer.encode(comp_content)) >= 512:
+            # Normalize compressor output to a string
+            result = self._compressor.compress_prompt(**compress_config)
+            if isinstance(result, dict) and 'compressed_prompt' in result:
+                comp_content = result['compressed_prompt']
+            else:
+                # Fallback: if the compressor returns a string directly
+                comp_content = result if isinstance(result, str) else str(result)
+
+            # Iteratively compress until within token budget (when tokenizer is provided)
+            while tokenizer is not None and isinstance(comp_content, str) and len(tokenizer.encode(comp_content)) >= 512:
                 new_compress_config = {
-                    'context': comp_content,
+                    # LLMLingua expects a list for context
+                    'context': [comp_content],
                     **self.config.compress_config
                 }
-                comp_content = self._compressor.compress_prompt(**new_compress_config)['compressed_prompt']
+                result = self._compressor.compress_prompt(**new_compress_config)
+                if isinstance(result, dict) and 'compressed_prompt' in result:
+                    comp_content = result['compressed_prompt']
+                else:
+                    comp_content = result if isinstance(result, str) else str(result)
             if comp_content != "":
                 mes['content'] = comp_content
             mes['content'] = mes['content'].strip()
