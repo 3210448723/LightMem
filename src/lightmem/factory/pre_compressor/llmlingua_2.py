@@ -1,4 +1,4 @@
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from lightmem.configs.pre_compressor.llmlingua_2 import LlmLingua2Config
 
 
@@ -36,13 +36,13 @@ class LlmLingua2Compressor:
     def compress(
         self,
         messages: List[Dict[str, str]],
-        tokenizer: None
+        tokenizer: Optional[Any]
     ):
         # TODO : Consider adding an extra field in the message, compressed_content, and put the compressed content in this field while keeping content unchanged.
         for mes in messages:
             compress_config = {
                 'context': [mes['content']],
-                **self.config.compress_config
+                **self.config.compress_config  # compress_config['rate']=0.8 compress_config['target_token']=-1
             }
             comp_content = self._compressor.compress_prompt(**compress_config)['compressed_prompt']
             while tokenizer is not None and len(tokenizer.encode(comp_content)) >= 512:

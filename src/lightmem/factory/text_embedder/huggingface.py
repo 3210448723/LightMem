@@ -5,14 +5,20 @@ import numpy as np
 from lightmem.configs.text_embedder.base_config import BaseTextEmbedderConfig
 
 class TextEmbedderHuggingface:
+    """
+    文本嵌入器（HuggingFace/SentenceTransformers 或远端 TEI）：
+    - 若配置提供 huggingface_base_url，则通过兼容的 OpenAI Embeddings 接口请求远端向量；
+    - 否则本地加载 SentenceTransformer 模型，按需推理并返回 numpy/list 向量；
+    - 初始化阶段尽量补全缺省配置（model / embedding_dims / model_kwargs）。
+    """
     def __init__(self, config: Optional[BaseTextEmbedderConfig] = None):
         self.config = config
-        if config.huggingface_base_url:
-            self.client = OpenAI(base_url=config.huggingface_base_url)
+        if config.huggingface_base_url:  # type: ignore[union-attr]
+            self.client = OpenAI(base_url=config.huggingface_base_url)  # type: ignore[union-attr]
         else:
-            self.config.model = config.model or "all-MiniLM-L6-v2"
-            self.model = SentenceTransformer(config.model, **config.model_kwargs)
-            self.config.embedding_dims = config.embedding_dims or self.model.get_sentence_embedding_dimension()
+            self.config.model = config.model or "all-MiniLM-L6-v2"  # type: ignore[union-attr]
+            self.model = SentenceTransformer(config.model, **(config.model_kwargs or {}))  # type: ignore[arg-type,union-attr]
+            self.config.embedding_dims = (config.embedding_dims or self.model.get_sentence_embedding_dimension())  # type: ignore[union-attr]
 
     @classmethod
     def from_config(cls, config):
@@ -39,7 +45,7 @@ class TextEmbedderHuggingface:
         Returns:
             list: The embedding vector.
         """
-        if self.config.huggingface_base_url:
+        if self.config.huggingface_base_url:  # type: ignore[union-attr]
             return self.client.embeddings.create(input=text, model="tei").data[0].embedding
         else:
             result = self.model.encode(text, convert_to_numpy=True)
