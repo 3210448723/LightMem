@@ -1,5 +1,10 @@
 __pycache__/
 *.py[cod]
-__pycache__/
 *.py[cod]
 *.class
+.history
+**.egg-info/
+*.egg
+.vscode/
+experiments/qdrant_data/
+llmlingua-2-bert-base-multilingual-cased-meetingbank/

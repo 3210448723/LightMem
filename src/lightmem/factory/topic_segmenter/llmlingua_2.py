@@ -20,7 +20,7 @@ class LlmLingua2Segmenter:
             self.tokenizer = compressor.inner_compressor.tokenizer
             self.buffer_len = getattr(self.model.config, "max_position_embeddings", 512)
 
-        self.layers = self.config.get("layers", [8, 9, 10, 11])
+        self.layers = self.config.get("layers", [8, 9, 10, 11])  # 注意力源自 LLMLingua-2 的较高层（第 8、9、10 和 11 层）。
 
     def sentence_level_attention(self, buffer_texts: List[str]):
         model, tokenizer = self.model, self.tokenizer

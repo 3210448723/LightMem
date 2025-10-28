@@ -2,39 +2,56 @@ import numpy as np
 from typing import List, Dict, Optional, Any
 
 class SenMemBufferManager:
+    """
+    感觉记忆缓冲（短窗口）：
+    - 负责以 token 数为上限接收消息，并在溢出或强制触发时进行主题切分；
+    - 先使用 segmenter 给出粗粒度边界，再基于 turn 语义相似度进行微调，形成相对一致的话题片段；
+    - 片段返回给上层的短期记忆缓冲进行进一步的抽取触发。
+    """
     def __init__(self, max_tokens: int = 512, tokenizer = None):
         self.max_tokens = max_tokens
         self.tokenizer = tokenizer
-        self.buffer: List[Dict] = []
-        self.big_buffer: List[Dict] = []
+        self.buffer: List[Dict] = []  # 当前缓冲的消息列表
+        self.big_buffer: List[Dict] = [] # 用于累计所有未处理的消息
         self.token_count: int = 0
 
     def _recount_tokens(self) -> None:
-        self.token_count = sum(len(self.tokenizer.encode(m["content"])) for m in self.buffer if m["role"]=="user")
+        # 仅统计 user 侧文本的 token 数，作为触发与截断的标准
+        # 注：此处假定 tokenizer 在实例化时已正确传入且具备 encode 方法；
+        # 若 tokenizer 为空，请在更高层保证不为 None。
+        self.token_count = sum(len(self.tokenizer.encode(m["content"])) for m in self.buffer if m["role"]=="user")  # type: ignore[union-attr]
 
     def add_messages(self, messages: List[Dict], segmenter, text_embedder) -> None:
+        """
+        将消息按顺序写入缓冲：
+        - 若为 user 侧消息且不超限，则累计；
+        - 若预计超限，则调用 cut_with_segmenter 执行切分并输出片段；
+        - assistant 侧消息不占用 token 上限，直接并行推进（保持轮次结构）。
+        返回收集到的全部片段。
+        """
         all_segments = []
         self.big_buffer.extend(messages)
 
         while self.big_buffer:
             for msg in self.big_buffer:
                 if msg["role"] == "user":
-                    cur_token_count = len(self.tokenizer.encode(msg["content"])) 
+                    cur_token_count = len(self.tokenizer.encode(msg["content"]))  # type: ignore[union-attr]
                     if self.token_count + cur_token_count <= self.max_tokens:
                         self.buffer.append(msg)
                         self.token_count += cur_token_count
                         self.big_buffer.remove(msg)
                     else:
-                        segments = self.cut_with_segmenter(segmenter, text_embedder)
+                        segments = self.cut_with_segmenter(segmenter, text_embedder)  # type: ignore[attr-defined]
                         all_segments.extend(segments)
                         break
                 else:
                     self.buffer.append(msg)
                     self.big_buffer.remove(msg)
 
-        return all_segments
+        return all_segments  # type: ignore[return-value]
 
     def should_trigger(self) -> bool:
+        # 简单触发条件：当前累计 token 是否达到上限
         return self.token_count >= self.max_tokens
 
     def cut_with_segmenter(self, segmenter, text_embedder, force_segment: bool=False) -> List:
@@ -48,12 +65,14 @@ class SenMemBufferManager:
         boundaries = segmenter.propose_cut(buffer_texts)
 
         if not boundaries:
+            # 若未给出粗粒度边界，直接整体作为一个片段输出并清空缓冲
             segments.append(self.buffer.copy())
             self.buffer.clear()
             self.token_count = 0
             return segments
 
         turns = []
+        # 将 (user, assistant) 组成 turn，作为语义相似度计算的基本单位
         for i in range(0, len(self.buffer), 2):
             user_msg = self.buffer[i]["content"]
             assistant_msg = self.buffer[i + 1]["content"]
@@ -67,6 +86,7 @@ class SenMemBufferManager:
 
         fine_boundaries = []
         threshold = 0.2
+        # 从低到高提升阈值，寻找相邻 turn 相似度的分界位置
         while threshold <= 0.5 and not fine_boundaries:
             for i in range(len(turns) - 1):
                 sim = self._cosine_similarity(embeddings[i], embeddings[i + 1])
@@ -76,12 +96,14 @@ class SenMemBufferManager:
                 threshold += 0.05
         
         if not fine_boundaries:
+            # 若仍无细粒度边界，整体作为一个片段输出并清空缓冲
             segments.append(self.buffer.copy())
             self.buffer.clear()
             self.token_count = 0
             return segments
 
         adjusted_boundaries = []
+        # 将细分界与粗分界对齐（允许一定偏移），优先靠近粗分界的细分点
         for fb in fine_boundaries:
             for cb in boundaries:
                 if abs(fb - cb) <= 3:
@@ -93,6 +115,7 @@ class SenMemBufferManager:
         boundaries = sorted(set(adjusted_boundaries))
 
         start_idx = 0
+        # 根据边界切分出若干片段，每个边界对应 2*boundary 的消息索引（user+assistant）
         for i, boundary in enumerate(boundaries):
             end_idx = 2 * boundary
             seg = self.buffer[start_idx:end_idx]
@@ -100,14 +123,17 @@ class SenMemBufferManager:
             start_idx = 2 * boundary
 
         if force_segment:
+            # 强制截断：剩余部分也作为一个片段输出
             segments.append(self.buffer[start_idx:])
             start_idx = len(boundaries)
 
         if start_idx > 0: 
+            # 删除已输出的片段，并重算 token 数
             del self.buffer[:start_idx]
             self._recount_tokens()
 
         return segments
 
     def _cosine_similarity(self, vec1, vec2):
+        # 计算余弦相似度，返回标量
         return float(np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2)))

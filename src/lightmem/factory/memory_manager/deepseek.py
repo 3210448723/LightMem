@@ -5,6 +5,13 @@ from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 
 class DeepseekManager:
     def __init__(self, config: BaseMemoryManagerConfig):
+        """
+        初始化 DeepSeek 风格的记忆管理器：
+        - 使用 OpenAI 兼容接口；
+        - 从配置中读取模型/密钥/接口地址；
+        - 仅负责请求与响应解析，不修改业务字符串。
+        注意：此文件当前实现可能依赖外部配置结构，请确保调用方传入的配置项完整。
+        """
         if not self.config.model:
             self.config.model = "deepseek-chat"
         self.api_key = self.config.api_key
@@ -25,14 +32,14 @@ class DeepseekManager:
 
     def _parse_response(self, response, tools):
         """
-        Process the response based on whether tools are used or not.
+        根据是否使用了工具（tools）来处理模型返回：
 
-        Args:
-            response: The raw response from API.
-            tools: The list of tools provided in the request.
+        参数：
+            response：API 原始返回对象。
+            tools：请求中提供的工具列表。
 
-        Returns:
-            str or dict: The processed response.
+        返回：
+            str 或 dict：处理后的结果（若使用工具则返回包含工具调用信息的字典，否则返回纯文本）。
         """
         if tools:
             processed_response = {
@@ -61,16 +68,16 @@ class DeepseekManager:
         tool_choice: str = "auto",
     ):
         """
-        Generate a response based on the given messages using DeepSeek.
+        使用 DeepSeek 接口基于给定消息生成回复。
 
-        Args:
-            messages (list): List of message dicts containing 'role' and 'content'.
-            response_format (str or object, optional): Format of the response. Defaults to "text".
-            tools (list, optional): List of tools that the model can call. Defaults to None.
-            tool_choice (str, optional): Tool choice method. Defaults to "auto".
+        参数：
+            messages (list)：消息列表（包含 'role' 与 'content'）。
+            response_format (str 或对象，可选)：响应格式，默认 "text"。
+            tools (list，可选)：可供模型调用的工具列表，默认 None。
+            tool_choice (str，可选)：工具选择方式，默认 "auto"。
 
-        Returns:
-            str: The generated response.
+        返回：
+            str：生成的回复内容（或在上层进一步解析）。
         """
         params = {
             "model": self.config.model,

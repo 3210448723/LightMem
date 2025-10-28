@@ -7,21 +7,39 @@ import os
 from lightmem.memory.lightmem import LightMemory
 
 # ============ API Configuration ============
+# 评测所用的大模型 API 配置：
+# - API_KEY / API_BASE_URL：你的推理服务密钥与基础 URL（可为空则使用默认）
+# - LLM_MODEL：主回答模型（用于生成最终答案）
+# - JUDGE_MODEL：评测判定模型（用于 Yes/No 判定）
 API_KEY='your_api_key_here'
-API_BASE_URL=''
-LLM_MODEL='qwen3-30b-a3b-instruct-2507'
+API_BASE_URL='http://127.0.0.1:11434/v1'
+# LLM_MODEL='qwen3-30b-a3b-instruct-2507'
+LLM_MODEL='qwen2.5:3b'
 JUDGE_MODEL='gpt-4o-mini'
 
 # ============ Model Paths ============
-LLMLINGUA_MODEL_PATH='/your/path/to/models/llmlingua-2-bert-base-multilingual-cased-meetingbank'
-EMBEDDING_MODEL_PATH='/your/path/to/models/all-MiniLM-L6-v2'
+# 本地/远端模型路径或名称：
+# - LLMLINGUA_MODEL_PATH：LLMLingua-2 压缩与分段模型路径
+# - EMBEDDING_MODEL_PATH：文本向量化模型路径（Sentence-Transformers 模型）
+LLMLINGUA_MODEL_PATH='microsoft/llmlingua-2-xlm-roberta-large-meetingbank'
+EMBEDDING_MODEL_PATH='all-MiniLM-L6-v2'
 
 # ============ Data Configuration ============
-DATA_PATH='/your/path/to/dataset/longmemeval/longmemeval_s.json'
+# 数据与结果存储：
+# - DATA_PATH：LongMemEval JSON 数据集路径
+# - RESULTS_DIR：结果输出目录
+# - QDRANT_DATA_DIR：Qdrant 本地存储目录（每个问题一个子集合，便于隔离）
+DATA_PATH='/home/user/yuanjinmin/longmemeval-cleaned/longmemeval_s_cleaned.json'
 RESULTS_DIR='../results'
 QDRANT_DATA_DIR='./qdrant_data'
 
 def get_anscheck_prompt(task, question, answer, response, abstention=False):
+    """
+    构造评测判定提示词：
+    - task 控制评测细则（如单会话/多会话/时间推理/知识更新/偏好），
+    - abstention=True 用于“不可回答”场景。
+    返回英文 prompt 字符串（严格保持原字符串模板不变）。
+    """
     if not abstention:
         if task in ['single-session-user', 'single-session-assistant', 'multi-session']:
             template = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
@@ -43,6 +61,11 @@ def get_anscheck_prompt(task, question, answer, response, abstention=False):
     return prompt
 
 def true_or_false(response):
+    """
+    将评测模型输出归一化为布尔值：
+    - 解析首行，匹配 yes/no（含 y/n 简写或句中包含）。
+    - 任何无法判定的情况均返回 False。
+    """
     if response is None:
         return False
     normalized = str(response).strip().lower()
@@ -65,6 +88,11 @@ def true_or_false(response):
 
 
 class LLMModel:
+    """
+    简单的 ChatCompletions 包装：
+    - 支持重试、温度/采样参数；
+    - 仅用于本实验的“生成答案”和“判定评测”两个角色。
+    """
     def __init__(self, model_name, api_key, base_url):
         self.name = model_name
         self.api_key = api_key
@@ -95,6 +123,13 @@ class LLMModel:
                     raise
 
 def load_lightmem(collection_name):
+    """
+    构建 LightMemory 配置：
+    - 启用预压缩（LLMLingua-2）与主题分段；
+    - 使用 HuggingFace 向量器 + Qdrant 作为向量检索；
+    - memory_manager 走 OpenAI 风格接口（可兼容自建网关）。
+    注意：每个问题使用独立的 Qdrant collection，避免跨问题污染。
+    """
     config = {
         "pre_compress": True,
         "pre_compressor": {
@@ -145,7 +180,7 @@ def load_lightmem(collection_name):
         },
         "update": "offline",
     }
-    lightmem = LightMemory.from_config(config)
+    lightmem = LightMemory.from_config(config)  # 从纯配置字典构造系统实例
     return lightmem
 
 llm_judge = LLMModel(JUDGE_MODEL, API_KEY, API_BASE_URL)
@@ -161,6 +196,7 @@ INIT_RESULT = {
 }
 
 for item in tqdm(data):
+    # 每个 question_id 独立构建记忆系统（独立向量库集合）
     print(item["question_id"])
     lightmem = load_lightmem(collection_name=item["question_id"])
     sessions = item["haystack_sessions"]
@@ -170,6 +206,7 @@ for item in tqdm(data):
 
     time_start = time.time()
     for session, timestamp in zip(sessions, timestamps):
+        # 清理会话起始非 user 轮次，保证 turn 对齐（user→assistant）
         while session and session[0]["role"] != "user":
             session.pop(0)
         num_turns = len(session) // 2  
@@ -182,6 +219,7 @@ for item in tqdm(data):
             is_last_turn = (
                 session is sessions[-1] and turn_idx == num_turns - 1
             )
+            # 在会话末尾强制 segment/extract，避免残留在缓冲中
             result = lightmem.add_memory(
                 messages=turn_messages,
                 force_segment=is_last_turn,
@@ -193,6 +231,7 @@ for item in tqdm(data):
     time_end = time.time()
     construction_time = time_end - time_start
 
+    # 检索相关记忆作为回答上下文（返回格式化字符串）
     related_memories = lightmem.retrieve(item["question"], limit=20)
     messages = []
     messages.append({"role": "system", "content": "You are a helpful assistant."})
@@ -200,7 +239,7 @@ for item in tqdm(data):
         "role": "user",
         "content": f"Question time:{item['question_date']} and question:{item['question']}\nPlease answer the question based on the following memories: {str(related_memories)}"
     })
-    generated_answer = llm.call(messages)
+    generated_answer = llm.call(messages)  # 主模型生成答案
 
     if 'abs' in item["question_id"]:
         prompt = get_anscheck_prompt(
@@ -211,9 +250,9 @@ for item in tqdm(data):
             item["question_type"], item["question"], item["answer"], generated_answer
         )
     messages = [{"role": "user", "content": prompt}]
-    response = llm_judge.call(messages)
+    response = llm_judge.call(messages)  # 评测模型做 Yes/No 判定
 
-    correct = 1 if true_or_false(response) else 0
+    correct = 1 if true_or_false(response) else 0  # 归一化为 0/1 指标
 
     save_data = {
         "question_id": item["question_id"],
@@ -224,7 +263,7 @@ for item in tqdm(data):
         "correct": correct,
     }
 
-    filename = f"../results/result_{item['question_id']}.json"
+    filename = f"../results/result_{item['question_id']}.json"  # 每题单独落盘，便于后续统计
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(save_data, f, ensure_ascii=False, indent=4)
