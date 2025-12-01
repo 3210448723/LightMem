@@ -196,6 +196,7 @@ def load_lightmem(collection_name):
             }
         },
         "update": "offline",
+        "locomo_style": True if "locomo" in DATA_PATH else False, # Enable locomo specific processing,
         "judge_only": True,  # 当试验结果存在且打算只做评测时，启用此选项
         "use_llm_judge": True,  # 是否启用 LLM 评测判定
     }

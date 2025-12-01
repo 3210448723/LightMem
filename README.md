@@ -231,10 +231,10 @@ lightmem = LightMemory.from_config(config_dict)
 session = {
 "timestamp": "2025-01-10",
 "turns": [
-    [
-        {"role": "user", "content": "My favorite ice cream flavor is pistachio, and my dog's name is Rex."}, 
-        {"role": "assistant", "content": "Got it. Pistachio is a great choice."}], 
-    ]
+  [
+    {"role": "user", "content": "My favorite ice cream flavor is pistachio, and my dog's name is Rex.", "speaker_name": "John","speaker_id": "speaker_a"},
+    {"role": "assistant", "content": "Got it. Pistachio is a great choice.", "speaker_name": "Assistant", "speaker_id": "speaker_b"}], 
+  ]
 }
 
 
@@ -519,7 +519,7 @@ We welcome contributions from the community! If you'd like to contribute, please
         <a href="https://github.com/MemTensor/MemOS">
           <img src="https://avatars.githubusercontent.com/MemTensor" width="80" style="border-radius:50%" alt="MemOS"/>
           <br />
-          <sub><b>Memos</b></sub>
+          <sub><b>MemOS</b></sub>
         </a>
       </td>
       <td align="center" width="150">

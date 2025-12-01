@@ -1,5 +1,6 @@
 import concurrent
 import concurrent.futures  # 为类型检查器显式导入 futures 模块（不改变运行时行为）
+from collections import defaultdict
 from openai import OpenAI
 from typing import List, Dict, Optional, Literal, Any
 import json, os, warnings
@@ -142,28 +143,37 @@ class OpenaiManager:
             params["tool_choice"] = tool_choice
 
         response = self.client.chat.completions.create(**params)
-        return self._parse_response(response, tools)
-    
+        usage_info = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "total_tokens": response.usage.total_tokens,
+        }
+        parsed_response = self._parse_response(response, tools)
+
+        return parsed_response, usage_info
+
     def meta_text_extract(
         self,
         system_prompt: str,
         extract_list: List[List[List[Dict]]],
-        allowed_roles: list[str] = ["user"]
+        allowed_roles: list[str] = ["user"],
+        topic_id_mapping: Optional[List[List[int]]] = None
     ) -> List[Optional[Dict]]:
         """
     使用并行处理从文本片段中抽取元数据（事实）。
 
         参数：
             system_prompt：用于元数据生成的系统提示词。
-            all_segments：待处理的消息片段列表（分组后的多段）。
+            extract_list：待处理的消息片段列表（分组后的多段）。
             messages_use：参与拼接的消息角色策略（user_only/assistant_only/hybrid）。
+            topic_id_mapping: For each API call, the global topic IDs
 
         返回：
             List[Optional[Dict]]：每个 API 调用的抽取结果字典（失败为 None）。
         """
         if not extract_list:
             return []
-            
+        
         def concatenate_messages(segment: List[Dict]) -> str:
             """Concatenate messages based on usage strategy"""
             message_lines = []
@@ -173,38 +183,63 @@ class OpenaiManager:
                     sequence_id = mes["sequence_number"]
                     role = mes["role"]
                     content = mes.get("content", "")
-                    message_lines.append(f"{sequence_id}.{role}: {content}")
+                    speaker_name = mes.get("speaker_name", "")
+                    time_stamp = mes.get("time_stamp", "")
+                    weekday = mes.get("weekday", "")
+                    
+                    time_prefix = ""
+                    if time_stamp and weekday:
+                        time_prefix = f"[{time_stamp}, {weekday}] "
 
+                    if speaker_name:
+                        message_lines.append(f"{time_prefix}{sequence_id//2}.{speaker_name}: {content}")
+                    else:
+                        message_lines.append(f"{time_prefix}{sequence_id//2}.{role}: {content}")
+            
             return "\n".join(message_lines)
-        
+
         max_workers = min(len(extract_list), 5)
 
-        def process_segment_wrapper(api_call_segments: List[List[Dict]]) -> Dict[str, Any]:
-            """处理一次 API 调用（内部可包含多个 topic 片段）。"""
+        def process_segment_wrapper(args):
+            api_call_idx, api_call_segments = args
             try:
-                user_prompt_parts = []
-                for idx, topic_segment in enumerate(api_call_segments, start=1):
-                    topic_text = concatenate_messages(topic_segment)
-                    user_prompt_parts.append(f"--- Topic {idx} ---\n{topic_text}")
+                user_prompt_parts: List[str] = []
+                
+                global_topic_ids: List[int] = []
+                if topic_id_mapping and api_call_idx < len(topic_id_mapping):
+                    global_topic_ids = topic_id_mapping[api_call_idx]
 
+                for topic_idx, topic_segment in enumerate(api_call_segments):
+                    if topic_idx < len(global_topic_ids):
+                        global_topic_id = global_topic_ids[topic_idx]
+                    else:
+                        global_topic_id = topic_idx + 1
+                    
+                    topic_text = concatenate_messages(topic_segment, messages_use)
+                    user_prompt_parts.append(f"--- Topic {global_topic_id} ---\n{topic_text}")
+
+                print(f"User prompt for API call {api_call_idx}:\n" + "\n".join(user_prompt_parts))
                 user_prompt = "\n".join(user_prompt_parts)
-
-                messages = [
+                
+                metadata_messages = [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user", "content": user_prompt},
                 ]
-                raw_response = self.generate_response(
-                    messages=messages,
-                    response_format={"type": "json_object"}
+                
+                raw_response, usage_info = self.generate_response(
+                    messages=metadata_messages,
+                    response_format={"type": "json_object"},
                 )
                 cleaned_result = clean_response(raw_response)  # type: ignore[arg-type]
                 return {
-                    "input_prompt": messages,
+                    "input_prompt": metadata_messages,
                     "output_prompt": raw_response,
-                    "cleaned_result": cleaned_result
+                    "cleaned_result": metadata_facts,
+                    "usage": usage_info,
                 }
+                
             except Exception as e:
-                print(f"Error processing API call: {e}")
+                print(f"Error processing API call {api_call_idx}: {e}")
                 # When error occurs, return empty but full structure
                 return {
                     "input_prompt": [],
@@ -214,7 +249,7 @@ class OpenaiManager:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             try:
-                results = list(executor.map(process_segment_wrapper, extract_list))
+                results = list(executor.map(process_segment_wrapper, enumerate(extract_list)))
             except Exception as e:
                 print(f"Error in parallel processing: {e}")
                 results = [None] * len(extract_list)
@@ -235,15 +270,16 @@ class OpenaiManager:
             {"role": "user", "content": user_prompt}
         ]
 
-        response_text = self.generate_response(
+        response_text, usage_info = self.generate_response(
             messages=messages,
             response_format={"type": "json_object"}
         )
-
+        
         try:
             result = json.loads(response_text)  # type: ignore[arg-type]
             if "action" not in result:
-                return {"action": "ignore"}
+                result = {"action": "ignore"}
+            result["usage"] = usage_info  
             return result
-        except:
-            return {"action": "ignore"}
+        except Exception:
+            return {"action": "ignore", "usage": usage_info if 'usage_info' in locals() else None}

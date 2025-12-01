@@ -17,8 +17,8 @@ from lightmem.factory.retriever.contextretriever.factory import ContextRetriever
 from lightmem.factory.retriever.embeddingretriever.factory import EmbeddingRetrieverFactory
 from lightmem.factory.memory_buffer.sensory_memory import SenMemBufferManager
 from lightmem.factory.memory_buffer.short_term_memory import ShortMemBufferManager
-from lightmem.memory.utils import MemoryEntry, assign_sequence_numbers_with_timestamps, save_memory_entries
-from lightmem.memory.prompts import METADATA_GENERATE_PROMPT, UPDATE_PROMPT
+from lightmem.memory.utils import MemoryEntry, assign_sequence_numbers_with_timestamps, save_memory_entries, convert_extraction_results_to_memory_entries
+from lightmem.memory.prompts import METADATA_GENERATE_PROMPT, UPDATE_PROMPT, METADATA_GENERATE_PROMPT_locomo
 from lightmem.configs.logging.utils import get_logger
 from concurrent.futures import ThreadPoolExecutor  # 使用显式导入，避免静态检查器无法解析 concurrent.futures
 from dateutil import parser # 需要 pip install python-dateutil
@@ -35,6 +35,8 @@ from dateutil import parser # 需要 pip install python-dateutil
 # - 检索（基于查询返回格式化的记忆文本）
 #
 # 注意：严格不修改任何已有字符串字面量内容；仅添加中文注释，保证行为不变。
+
+GLOBAL_TOPIC_IDX = 0
 
 
 class MessageNormalizer:
@@ -183,6 +185,19 @@ class LightMemory:
         
         self.logger = get_logger("LightMemory")
         self.logger.info("Initializing LightMemory with provided configuration")
+        self.token_stats = {
+            "add_memory_calls": 0,
+            "add_memory_prompt_tokens": 0,
+            "add_memory_completion_tokens": 0,
+            "add_memory_total_tokens": 0,
+            "update_calls": 0,
+            "update_prompt_tokens": 0,
+            "update_completion_tokens": 0,
+            "update_total_tokens": 0,
+            "embedding_calls": 0,
+            "embedding_total_tokens": 0,
+        }
+        self.logger.info("Token statistics tracking initialized")
         
         self.config = config
 
@@ -204,7 +219,8 @@ class LightMemory:
         # 记忆管理器：调用大模型进行元数据生成与更新决策
         self.manager = MemoryManagerFactory.from_config(self.config.memory_manager)
         # 短期记忆缓冲：聚合分段结果并根据策略触发抽取
-        self.shortmem_buffer_manager = ShortMemBufferManager(max_tokens = 1024, tokenizer=getattr(self.manager, "tokenizer", self.manager.config.model))
+        # TODO : 根据论文，gpt最优是 512，qwen最优是768
+        self.shortmem_buffer_manager = ShortMemBufferManager(max_tokens = 768, tokenizer=getattr(self.manager, "tokenizer", self.manager.config.model))
         if self.config.index_strategy == 'embedding' or self.config.index_strategy == 'hybrid':
             self.logger.info("Initializing text embedder")
             # 文本嵌入器：为记忆或查询生成向量表示
@@ -359,90 +375,47 @@ class LightMemory:
             self.logger.debug(f"[{call_id}] Extraction not triggered, returning result")
             return result # TODO 
         
+        global GLOBAL_TOPIC_IDX
+        topic_id_mapping = []
+        for api_call_segments in extract_list:
+            api_call_topic_ids = []
+            for topic_segment in api_call_segments:
+                api_call_topic_ids.append(GLOBAL_TOPIC_IDX)
+                GLOBAL_TOPIC_IDX += 1
+            topic_id_mapping.append(api_call_topic_ids)
+        self.logger.debug(f"topic_id_mapping: {topic_id_mapping}")
+        self.logger.info(f"[{call_id}] Assigned global topic IDs: total={sum(len(x) for x in topic_id_mapping)}, mapping={topic_id_mapping}")
         self.logger.info(f"[{call_id}] Extraction triggered {extract_trigger_num} times, extract_list length: {len(extract_list)}")
         # 为抽取消息标注全局序号（sequence_number），并收集其时间戳与星期
-        extract_list, timestamps_list, weekday_list = assign_sequence_numbers_with_timestamps(extract_list)
-        self.logger.info(f"[{call_id}] Assigned timestamps to {len(extract_list)} items")
-        self.logger.debug(f"[{call_id}] Timestamps sample: {timestamps_list}")
-        self.logger.debug(f"[{call_id}] Weekdays sample: {weekday_list}")
+        extract_list, timestamps_list, weekday_list, speaker_list, topic_id_map = assign_sequence_numbers_with_timestamps(extract_list, offset_ms=500, topic_id_mapping=topic_id_mapping)
         self.logger.debug(f"[{call_id}] Extract list sample: {json.dumps(extract_list)}")
-
+        max_source_ids = [sum(1 for seg in batch for msg in seg if msg.get("role") == "user") - 1 for batch in extract_list]
+        self.logger.info(f"[{call_id}] Batch max_source_ids: {max_source_ids}")
         # 6) 元数据/事实抽取：调用大模型对抽取片段进行事实级汇总
         if self.config.metadata_generate and self.config.text_summary:
             self.logger.info(f"[{call_id}] Starting metadata generation")
-            extracted_results = self.manager.meta_text_extract(METADATA_GENERATE_PROMPT, extract_list, self.allowed_roles)
+            prompt = METADATA_GENERATE_PROMPT_locomo if self.config.locomo_style else METADATA_GENERATE_PROMPT
+            extracted_results = self.manager.meta_text_extract(prompt, extract_list, self.config.messages_use)
             for item in extracted_results:
                 if item is not None:
                     result["add_input_prompt"].append(item["input_prompt"])
                     result["add_output_prompt"].append(item["output_prompt"])
                     result["api_call_nums"] += 1
             self.logger.info(f"[{call_id}] Metadata generation completed with {result['api_call_nums']} API calls")
-            extracted_memory_entry = [item["cleaned_result"] for item in extracted_results if item]
-            self.logger.info(f"[{call_id}] Extracted {len(extracted_memory_entry)} memory entries")
-            self.logger.debug(f"[{call_id}] Extracted memory entry sample: {json.dumps(extracted_memory_entry)}")
-        # 7) 组装 MemoryEntry：将事实绑定时间戳/星期，以便后续检索/更新
-        memory_entries = []
-        for topic_memory in extracted_memory_entry:
-            if not topic_memory:
-                continue
-            for entry in topic_memory:
-                # 设置安全默认值，防止后续未赋值引用
-                now_dt = datetime.now()
-                time_stamp: str = now_dt.isoformat(timespec="seconds")
-                float_time_stamp: float = now_dt.timestamp()
-                weekday: str = now_dt.strftime("%a")
 
-                sequence_n = entry.get("source_id")
-                try:
-                    # 校验 source_id 的合法性
-                    # 如果 sequence_n 是字符串且可以转换为整数，则继续处理
-                    if isinstance(sequence_n, str) and sequence_n.isdigit():
-                        sequence_n = int(sequence_n)
-
-                    if sequence_n is None or not isinstance(sequence_n, int):
-                        raise TypeError(f"Invalid source_id: {sequence_n}")
-                    
-                    # 如果 source_id 超出范围，抛出异常
-
-                    # 从已对齐的列表中读取时间与星期
-                    ts_value = timestamps_list[sequence_n]
-                    wd_value = weekday_list[sequence_n]
-
-                    if isinstance(ts_value, (int, float)):
-                        # 若为浮点时间戳，转换回人类可读并记录双格式
-                        float_time_stamp = float(ts_value)
-                        time_stamp = datetime.fromtimestamp(float_time_stamp).isoformat(timespec="seconds")
-                    elif isinstance(ts_value, str):
-                        # 预期为 ISO 字符串
-                        time_stamp = ts_value
-                        try:
-                            float_time_stamp = datetime.fromisoformat(time_stamp).timestamp()
-                        except Exception:
-                            # 兼容非严格 ISO 字符串
-                            float_time_stamp = now_dt.timestamp()
-                    else:
-                        # 未知类型，回退到当前时间
-                        time_stamp = now_dt.isoformat(timespec="seconds")
-                        float_time_stamp = now_dt.timestamp()
-
-                    weekday = str(wd_value) if wd_value is not None else weekday
-                except (IndexError, TypeError) as e:
-                    # 回退到默认时间，并记录告警但不中断流程
-                    self.logger.warning(f"[{call_id}] Error getting timestamp for sequence {sequence_n}: {e}; fallback to now()")
-
-                mem_obj = MemoryEntry(
-                    time_stamp=time_stamp,
-                    float_time_stamp=float_time_stamp,
-                    weekday=weekday,
-                    memory=entry.get("fact", ""),
-                    # original_memory=entry.get("original_fact", ""),  # TODO
-                    # compressed_memory=""  # TODO
-                )
-                memory_entries.append(mem_obj)
-
+        memory_entries = convert_extraction_results_to_memory_entries(
+            extracted_results=extracted_results,
+            timestamps_list=timestamps_list,
+            weekday_list=weekday_list,
+            speaker_list=speaker_list,
+            topic_id_map=topic_id_map,
+            max_source_ids=max_source_ids,
+            logger=self.logger,
+            call_id=call_id
+        )
         self.logger.info(f"[{call_id}] Created {len(memory_entries)} MemoryEntry objects")
         for i, mem in enumerate(memory_entries):
-            self.logger.debug(f"[{call_id}] MemoryEntry[{i}]: time={mem.time_stamp}, weekday={mem.weekday}, memory={mem.memory}")
+            self.logger.debug(f"[{call_id}] MemoryEntry[{i}]: time={mem.time_stamp}, weekday={mem.weekday}, speaker_id={mem.speaker_id}, speaker_name={mem.speaker_name}, topic_id={mem.topic_id}, memory={mem.memory}")
 
         # 8) 入库：支持 online/offline 两种写入策略（默认 offline）
         if self.config.update == "online":
@@ -450,6 +423,11 @@ class LightMemory:
         elif self.config.update == "offline":
             self.offline_update(memory_entries)
         
+        self.logger.info(
+            f"[{call_id}] Cumulative token stats - "
+            f"Total API calls: {self.token_stats['add_memory_calls']}, "
+            f"Total tokens: {self.token_stats['add_memory_total_tokens']}"
+        )
         return result
 
     def online_update(self, memory_list: List):
@@ -483,12 +461,16 @@ class LightMemory:
                     "time_stamp": mem_obj.time_stamp,
                     "float_time_stamp": mem_obj.float_time_stamp,
                     "weekday": mem_obj.weekday,
+                    "topic_id": mem_obj.topic_id,
+                    "topic_summary": mem_obj.topic_summary,
                     "category": mem_obj.category,
                     "subcategory": mem_obj.subcategory,
                     "memory_class": mem_obj.memory_class,
                     "memory": mem_obj.memory,
                     "original_memory": mem_obj.original_memory,
                     "compressed_memory": mem_obj.compressed_memory,
+                    "speaker_id": mem_obj.speaker_id,
+                    "speaker_name": mem_obj.speaker_name,
                 }
                 self.embedding_retriever.insert(
                     vectors = [embedding_vector],
@@ -596,7 +578,7 @@ class LightMemory:
         )
         self.logger.info(f"========== END {call_id} ==========")
 
-    def offline_update_all_entries(self, score_threshold: float = 0.5, max_workers: int = 5):
+    def offline_update_all_entries(self, score_threshold: float = 0.9, max_workers: int = 5):
         """
         Perform offline updates for all entries based on their update_queue, in parallel.
 
@@ -625,7 +607,13 @@ class LightMemory:
         skipped_count = 0
         lock = threading.Lock()
         write_lock = threading.Lock()
-
+        update_token_stats = {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+        token_lock = threading.Lock()
         def update_entry(entry):
             nonlocal processed_count, updated_count, deleted_count, skipped_count
             
@@ -652,7 +640,19 @@ class LightMemory:
 
             if updated_entry is None:
                 return
-
+            # ====== token consumption ======
+            usage = updated_entry["usage"]
+            with token_lock:
+                update_token_stats["calls"] += 1
+                update_token_stats["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                update_token_stats["completion_tokens"] += usage.get("completion_tokens", 0)
+                update_token_stats["total_tokens"] += usage.get("total_tokens", 0)
+                
+            self.logger.debug(
+                f"[{call_id}] Update LLM call for {eid} - "
+                f"Tokens: {usage.get('total_tokens', 0)}"
+            )
+            # ==================== token consumption ====================
             action = updated_entry.get("action")
             if action == "delete":
                 with write_lock:
@@ -672,11 +672,20 @@ class LightMemory:
         self.logger.info(f"[{call_id}] Starting parallel offline update with {max_workers} workers")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             executor.map(update_entry, all_entries)
+        with lock:
+            self.token_stats["update_calls"] += update_token_stats["calls"]
+            self.token_stats["update_prompt_tokens"] += update_token_stats["prompt_tokens"]
+            self.token_stats["update_completion_tokens"] += update_token_stats["completion_tokens"]
+            self.token_stats["update_total_tokens"] += update_token_stats["total_tokens"]    
         self.logger.info(f"[{call_id}] Offline update completed:")
         self.logger.info(f"[{call_id}]   - Processed: {processed_count} entries")
         self.logger.info(f"[{call_id}]   - Updated: {updated_count} entries")
         self.logger.info(f"[{call_id}]   - Deleted: {deleted_count} entries")
         self.logger.info(f"[{call_id}]   - Skipped (no candidates): {skipped_count} entries")
+        self.logger.info(
+            f"[{call_id}]   - Update API calls: {update_token_stats['calls']}, "
+            f"Total tokens: {update_token_stats['total_tokens']}"
+        )
         self.logger.info(f"========== END {call_id} ==========")
     
     def retrieve(self, query: str, limit: int = 10, filters: Optional[dict] = None) -> str:
@@ -729,3 +738,38 @@ class LightMemory:
             "hybrid": ["user", "assistant", "Caroline", "Melanie"],
         }
         return role_map.get(role, [])
+    
+    def get_token_statistics(self):
+        embedder_stats = {"total_calls": 0, "total_tokens": None}
+        if hasattr(self, 'text_embedder') and hasattr(self.text_embedder, 'get_stats'):
+            embedder_stats = self.text_embedder.get_stats()
+        
+        stats = {
+            "summary": {
+                "total_llm_calls": self.token_stats["add_memory_calls"] + self.token_stats["update_calls"],
+                "total_llm_tokens": self.token_stats["add_memory_total_tokens"] + self.token_stats["update_total_tokens"],
+                "total_embedding_calls": embedder_stats["total_calls"],
+                "total_embedding_tokens": embedder_stats["total_tokens"],
+            },
+            "llm": {
+                "add_memory": {
+                    "calls": self.token_stats["add_memory_calls"],
+                    "prompt_tokens": self.token_stats["add_memory_prompt_tokens"],
+                    "completion_tokens": self.token_stats["add_memory_completion_tokens"],
+                    "total_tokens": self.token_stats["add_memory_total_tokens"],
+                },
+                "update": {
+                    "calls": self.token_stats["update_calls"],
+                    "prompt_tokens": self.token_stats["update_prompt_tokens"],
+                    "completion_tokens": self.token_stats["update_completion_tokens"],
+                    "total_tokens": self.token_stats["update_total_tokens"],
+                },
+            },
+            "embedding": {
+                "total_calls": embedder_stats["total_calls"],
+                "total_tokens": embedder_stats["total_tokens"],
+                "note": "Includes topic segmentation + memory indexing. Local models show None for tokens."
+            }
+        }
+        
+        return stats

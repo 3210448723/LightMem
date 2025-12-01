@@ -14,7 +14,7 @@ class ShortMemBufferManager:
         self.tokenizer = resolve_tokenizer(tokenizer)
         self.buffer: List[List[Dict[str, Any]]] = [] 
         self.token_count: int = 0 
-
+        print(f"ShortMemBufferManager initialized with max_tokens={self.max_tokens}")
     def _count_tokens(self, messages: List[Dict[str, Any]], allowed_roles: list[str]) -> int:
         text_list = [msg["content"] for msg in messages if msg["role"] in allowed_roles]
 
