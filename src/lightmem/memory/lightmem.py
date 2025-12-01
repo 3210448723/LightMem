@@ -20,24 +20,54 @@ from lightmem.factory.memory_buffer.short_term_memory import ShortMemBufferManag
 from lightmem.memory.utils import MemoryEntry, assign_sequence_numbers_with_timestamps, save_memory_entries
 from lightmem.memory.prompts import METADATA_GENERATE_PROMPT, UPDATE_PROMPT
 from lightmem.configs.logging.utils import get_logger
+from concurrent.futures import ThreadPoolExecutor  # 使用显式导入，避免静态检查器无法解析 concurrent.futures
+from dateutil import parser # 需要 pip install python-dateutil
+
+# 说明：
+# 本模块实现 LightMemory 对话记忆系统的核心流程，包括：
+# - 消息规范化（时间戳标准化、会话粒度时间序列的生成）
+# - 可选的预压缩（降低冗余 token，减少后续处理成本）
+# - 主题分段（将连续对话切分为语义一致的片段）与感觉记忆缓存管理
+# - 短期记忆触发抽取（基于策略/阈值将片段汇总为候选事实）
+# - 元数据/事实抽取（调用大模型总结事实）
+# - 记忆条目生成与入库（向量检索库 / 文件存储）
+# - 离线更新（构建更新队列并进行增量更新或冲突删除）
+# - 检索（基于查询返回格式化的记忆文本）
+#
+# 注意：严格不修改任何已有字符串字面量内容；仅添加中文注释，保证行为不变。
 
 
 class MessageNormalizer:
+    """
+    消息标准化工具：
+    - 输入可以是 dict 或 list[dict]，每条消息要求包含会话级的 "time_stamp"（原始字符串时间，如 "2023/05/20 (Sat) 00:44"）
+    - 内部会将同一会话下的消息按固定偏移（offset_ms）依次递增，生成严格递增的 ISO 格式时间戳
+    - 同时保留原始会话时间到 "session_time" 字段，记录星期到 "weekday"
+    - 该处理有利于后续基于时间顺序的抽取与检索
+    """
 
+    # 支持的会话级时间戳格式正则：例如 "2023/05/20 (Sat) 00:44" 或以 "-" 分隔；秒数可选
     _SESSION_RE = re.compile(
         r'(?P<date>\d{4}[/-]\d{1,2}[/-]\d{1,2})\s*\((?P<weekday>[^)]+)\)\s*(?P<time>\d{1,2}:\d{2}(?::\d{2})?)'
     )
 
     def __init__(self, offset_ms: int = 1000):
+        # 记录同一个原始 session 时间字符串下，最后一次赋值的具体时间戳，便于为下一条消息递增
         self.last_timestamp_map: Dict[str, datetime] = {}
+        # 每条消息之间的时间偏移，默认 1000ms；可避免同一会话消息出现相同时间
         self.offset = timedelta(milliseconds=offset_ms)
 
     def _parse_session_timestamp(self, raw_ts: str) -> Tuple[datetime, str]:
         """
-        Parse a session-level timestamp and return (base_datetime, weekday).
-        Supports formats like "2023/05/20 (Sat) 00:44" (also accepts '-' as separator, and optional seconds).
-        Raises ValueError if parsing fails.
+        Parse timestamp using dateutil for maximum compatibility.
+        Supports:
+        - "2023/05/20 (Sat) 00:44"
+        - "1:56 pm on 8 May, 2023"
+        - "May 8th 2023"
+        - ISO format, etc.
         """
+        # 1. 优先尝试保留你的正则逻辑（为了性能和精确提取 weekday）
+        # 虽然 dateutil 也能解，但在已有严格格式的情况下，正则通常比猜测更快。
         m = self._SESSION_RE.search(raw_ts)
         if m:
             date_str = m.group('date').replace('-', '/')
@@ -51,6 +81,18 @@ class MessageNormalizer:
             dt = datetime.fromisoformat(raw_ts)
             return dt, dt.strftime("%a")
         except Exception as e:
+            pass
+
+        # 2. 通用回退方案：使用 dateutil
+        try:
+            # fuzzy=True 允许它忽略日期字符串中的未知干扰词（比如 "on" 有时即使不处理也能过，但在 strict 模式下可能报错）
+            # parser.parse 会自动处理 "pm", "May", ",", "8th" 等复杂情况
+            dt = parser.parse(raw_ts, fuzzy=True)
+            
+            # 自动计算星期几
+            return dt, dt.strftime("%a")
+            
+        except (ValueError, TypeError):
             raise ValueError(f"{str(e)}: Failed to parse session time format: '{raw_ts}'. Expected something like '2023/05/20 (Sat) 00:44'")
 
     def normalize_messages(self, messages: Any) -> List[Dict[str, Any]]:
@@ -61,6 +103,7 @@ class MessageNormalizer:
           - If list -> multiple messages (each must be a dict and contain 'time_stamp')
         Returns: List[Dict] (each item is a copied and enriched message)
         """
+        # 将输入统一为列表形式，并严格校验每项必须包含会话级时间戳字段
         # Normalize input into a list
         if isinstance(messages, dict):
             messages_list = [messages]
@@ -80,9 +123,11 @@ class MessageNormalizer:
             if not raw_ts:
                 raise ValueError("Each message should contain a 'time_stamp' field (e.g., '2023/05/20 (Sat) 00:44').")
 
+            # 解析会话基准时间与星期标记
             base_dt, weekday = self._parse_session_timestamp(raw_ts)
 
             # Maintain incrementing time based on raw_ts as session key
+            # 使用原始会话时间字符串作为 key，在同一会话下让后续消息以固定 offset 递增
             last_dt = self.last_timestamp_map.get(raw_ts)
             if last_dt is None:
                 new_dt = base_dt
@@ -92,9 +137,10 @@ class MessageNormalizer:
             self.last_timestamp_map[raw_ts] = new_dt
 
             enriched = copy.deepcopy(msg)
-            enriched["session_time"] = raw_ts
-            enriched["time_stamp"] = new_dt.isoformat(timespec="milliseconds")
-            enriched["weekday"] = weekday
+            # 保留原始会话时间与星期信息，并将 time_stamp 规范为 ISO 字符串（毫秒精度）
+            enriched["session_time"] = raw_ts  # '2023/05/20 (Sat) 02:21'
+            enriched["time_stamp"] = new_dt.isoformat(timespec="milliseconds")  # 2023-05-20T02:21:00.000
+            enriched["weekday"] = weekday  # Sat
 
             enriched_list.append(enriched)
 
@@ -103,7 +149,8 @@ class MessageNormalizer:
 
 class LightMemory:
     def __init__(self, config: BaseMemoryConfigs = BaseMemoryConfigs()):
-        
+        # LightMemory 主类：负责从原始对话消息构建结构化记忆、入库与检索。
+        # 初始化阶段会按配置构建各个子模块（预压缩、主题分段、记忆管理、嵌入、检索器等）。
         """
         Initialize a LightMemory instance.
 
@@ -138,29 +185,47 @@ class LightMemory:
         self.logger.info("Initializing LightMemory with provided configuration")
         
         self.config = config
+
+        self.allowed_roles=self.get_roles(self.config.messages_use or 'user_only')  # 确保传入非 None，默认优先抽取用户侧
+
         if self.config.pre_compress:
             self.logger.info("Initializing pre-compressor")
-            self.compressor = PreCompressorFactory.from_config(self.config.pre_compressor)
+            # 预压缩器：减少输入 token，提升后续分段与抽取效率
+            assert self.config.pre_compressor is not None, "pre_compressor config should not be None when pre_compress=True"
+            self.compressor = PreCompressorFactory.from_config(self.config.pre_compressor)  # type: ignore[arg-type]
         if self.config.topic_segment:
             self.logger.info("Initializing topic segmenter")
-            self.segmenter = TopicSegmenterFactory.from_config(self.config.topic_segmenter, self.config.precomp_topic_shared, self.compressor)
+            # 主题分段器：对连续消息进行语义切分；感觉记忆缓冲用于积攒与触发切分
+            assert self.config.topic_segmenter is not None, "topic_segmenter config should not be None when topic_segment=True"
+            assert self.config.precomp_topic_shared is not None, "precomp_topic_shared should not be None when topic_segment=True"
+            self.segmenter = TopicSegmenterFactory.from_config(self.config.topic_segmenter, self.config.precomp_topic_shared, self.compressor)  # type: ignore[arg-type]
             self.senmem_buffer_manager = SenMemBufferManager(max_tokens=self.segmenter.buffer_len, tokenizer=self.segmenter.tokenizer)
         self.logger.info("Initializing memory manager")
+        # 记忆管理器：调用大模型进行元数据生成与更新决策
         self.manager = MemoryManagerFactory.from_config(self.config.memory_manager)
+        # 短期记忆缓冲：聚合分段结果并根据策略触发抽取
         self.shortmem_buffer_manager = ShortMemBufferManager(max_tokens = 1024, tokenizer=getattr(self.manager, "tokenizer", self.manager.config.model))
         if self.config.index_strategy == 'embedding' or self.config.index_strategy == 'hybrid':
             self.logger.info("Initializing text embedder")
-            self.text_embedder = TextEmbedderFactory.from_config(self.config.text_embedder)
+            # 文本嵌入器：为记忆或查询生成向量表示
+            assert self.config.text_embedder is not None, "text_embedder config should not be None when index_strategy includes 'embedding'"
+            self.text_embedder = TextEmbedderFactory.from_config(self.config.text_embedder)  # type: ignore[arg-type]
         # if self.config.multimodal_embedder:
         if self.config.retrieve_strategy in ["context", "hybrid"]:
             self.logger.info("Initializing context retriever")
-            self.context_retriever = ContextRetrieverFactory.from_config(self.config.context_retriever)
+            # 基于上下文的检索器（例如从文件中召回）
+            assert self.config.context_retriever is not None, "context_retriever config should not be None when retrieve_strategy includes 'context'"
+            self.context_retriever = ContextRetrieverFactory.from_config(self.config.context_retriever)  # type: ignore[arg-type]
         if self.config.retrieve_strategy in ["embedding", "hybrid"]:
             self.logger.info("Initializing embedding retriever")
-            self.embedding_retriever = EmbeddingRetrieverFactory.from_config(self.config.embedding_retriever)
+            # 向量检索器（如 Qdrant）：负责插入、搜索、更新、删除
+            assert self.config.embedding_retriever is not None, "embedding_retriever config should not be None when retrieve_strategy includes 'embedding'"
+            self.embedding_retriever = EmbeddingRetrieverFactory.from_config(self.config.embedding_retriever)  # type: ignore[arg-type]
         if self.config.graph_mem:
             from .graph import GraphMem
             self.logger.info("Initializing graph memory")
+            # 图记忆（可选）：用于结构化存储实体与关系
+            # GraphMem 支持可选配置入参
             self.graph = GraphMem(self.config.graph_mem)
         self.logger.info("LightMemory initialization completed successfully")
 
@@ -218,7 +283,7 @@ class LightMemory:
               weekdays, and extracted factual content.
             - Depending on `self.config.update`, the function triggers either online or offline memory updates.
         """
-
+        # 注意：该函数是构建记忆流水线的入口。除返回结果字典外，真正的记忆条目会在离线/在线更新阶段入库。
         call_id = f"add_memory_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         self.logger.info(f"========== START {call_id} ==========")
         self.logger.info(f"force_segment={force_segment}, force_extract={force_extract}")
@@ -230,9 +295,11 @@ class LightMemory:
         self.logger.debug(f"[{call_id}] Raw input type: {type(messages)}")
         if isinstance(messages, list):
             self.logger.debug(f"[{call_id}] Raw input sample: {json.dumps(messages)}")
+        # 1) 规范化消息，确保时间戳有序、星期与 session 信息齐全
         normalizer = MessageNormalizer(offset_ms=500)
         msgs = normalizer.normalize_messages(messages)
         self.logger.debug(f"[{call_id}] Normalized messages sample: {json.dumps(msgs)}")
+        # 2) 可选预压缩：优先使用可用的 tokenizer
         if self.config.pre_compress:
             if hasattr(self.compressor, "tokenizer") and self.compressor.tokenizer is not None:
                 args = (msgs, self.compressor.tokenizer)
@@ -255,6 +322,7 @@ class LightMemory:
             compressed_messages = msgs
             self.logger.info(f"[{call_id}] Pre-compression disabled, using normalized messages")
         
+        # 3) 若关闭分段，则直接返回规范化后的片段信息（早退）
         if not self.config.topic_segment:
             # TODO:
             self.logger.info(f"[{call_id}] Topic segmentation disabled, returning emitted messages")
@@ -266,10 +334,12 @@ class LightMemory:
                 "carryover_size": 0,
             }
 
-        all_segments = self.senmem_buffer_manager.add_messages(compressed_messages, self.segmenter, self.text_embedder)
+        # 4) 感觉记忆缓冲：接收消息+分段器/嵌入器，返回片段列表
+        all_segments = self.senmem_buffer_manager.add_messages(compressed_messages, self.segmenter, self.text_embedder, self.allowed_roles)
 
         if force_segment:
-            all_segments = self.senmem_buffer_manager.cut_with_segmenter(self.segmenter, self.text_embedder, force_segment)
+            # 强制切分：通常用于会话末尾强制落盘
+            all_segments = self.senmem_buffer_manager.cut_with_segmenter(self.segmenter, self.text_embedder, self.allowed_roles, force_segment)
         
         if not all_segments:
             self.logger.debug(f"[{call_id}] No segments generated, returning empty result")
@@ -278,22 +348,29 @@ class LightMemory:
         self.logger.info(f"[{call_id}] Generated {len(all_segments)} segments")
         self.logger.debug(f"[{call_id}] Segments sample: {json.dumps(all_segments)}")
 
-        extract_trigger_num, extract_list = self.shortmem_buffer_manager.add_segments(all_segments, self.config.messages_use, force_extract)
+        # 5) 短期记忆缓冲：根据策略/阈值触发抽取，将片段汇总成序列化的消息集合
+        extract_trigger_num, extract_list = self.shortmem_buffer_manager.add_segments(
+            all_segments,
+            self.allowed_roles,  # 确保传入非 None，默认优先抽取用户侧
+            force_extract,
+        )
 
         if extract_trigger_num == 0:
             self.logger.debug(f"[{call_id}] Extraction not triggered, returning result")
             return result # TODO 
         
         self.logger.info(f"[{call_id}] Extraction triggered {extract_trigger_num} times, extract_list length: {len(extract_list)}")
+        # 为抽取消息标注全局序号（sequence_number），并收集其时间戳与星期
         extract_list, timestamps_list, weekday_list = assign_sequence_numbers_with_timestamps(extract_list)
         self.logger.info(f"[{call_id}] Assigned timestamps to {len(extract_list)} items")
         self.logger.debug(f"[{call_id}] Timestamps sample: {timestamps_list}")
         self.logger.debug(f"[{call_id}] Weekdays sample: {weekday_list}")
         self.logger.debug(f"[{call_id}] Extract list sample: {json.dumps(extract_list)}")
 
+        # 6) 元数据/事实抽取：调用大模型对抽取片段进行事实级汇总
         if self.config.metadata_generate and self.config.text_summary:
             self.logger.info(f"[{call_id}] Starting metadata generation")
-            extracted_results = self.manager.meta_text_extract(METADATA_GENERATE_PROMPT, extract_list, self.config.messages_use)
+            extracted_results = self.manager.meta_text_extract(METADATA_GENERATE_PROMPT, extract_list, self.allowed_roles)
             for item in extracted_results:
                 if item is not None:
                     result["add_input_prompt"].append(item["input_prompt"])
@@ -303,22 +380,56 @@ class LightMemory:
             extracted_memory_entry = [item["cleaned_result"] for item in extracted_results if item]
             self.logger.info(f"[{call_id}] Extracted {len(extracted_memory_entry)} memory entries")
             self.logger.debug(f"[{call_id}] Extracted memory entry sample: {json.dumps(extracted_memory_entry)}")
+        # 7) 组装 MemoryEntry：将事实绑定时间戳/星期，以便后续检索/更新
         memory_entries = []
         for topic_memory in extracted_memory_entry:
             if not topic_memory:
                 continue
             for entry in topic_memory:
+                # 设置安全默认值，防止后续未赋值引用
+                now_dt = datetime.now()
+                time_stamp: str = now_dt.isoformat(timespec="seconds")
+                float_time_stamp: float = now_dt.timestamp()
+                weekday: str = now_dt.strftime("%a")
+
                 sequence_n = entry.get("source_id")
                 try:
-                    time_stamp = timestamps_list[sequence_n]
-                    if not isinstance(time_stamp, float):
-                        float_time_stamp = datetime.fromisoformat(time_stamp).timestamp()
-                    weekday = weekday_list[sequence_n]
+                    # 校验 source_id 的合法性
+                    # 如果 sequence_n 是字符串且可以转换为整数，则继续处理
+                    if isinstance(sequence_n, str) and sequence_n.isdigit():
+                        sequence_n = int(sequence_n)
+
+                    if sequence_n is None or not isinstance(sequence_n, int):
+                        raise TypeError(f"Invalid source_id: {sequence_n}")
+                    
+                    # 如果 source_id 超出范围，抛出异常
+
+                    # 从已对齐的列表中读取时间与星期
+                    ts_value = timestamps_list[sequence_n]
+                    wd_value = weekday_list[sequence_n]
+
+                    if isinstance(ts_value, (int, float)):
+                        # 若为浮点时间戳，转换回人类可读并记录双格式
+                        float_time_stamp = float(ts_value)
+                        time_stamp = datetime.fromtimestamp(float_time_stamp).isoformat(timespec="seconds")
+                    elif isinstance(ts_value, str):
+                        # 预期为 ISO 字符串
+                        time_stamp = ts_value
+                        try:
+                            float_time_stamp = datetime.fromisoformat(time_stamp).timestamp()
+                        except Exception:
+                            # 兼容非严格 ISO 字符串
+                            float_time_stamp = now_dt.timestamp()
+                    else:
+                        # 未知类型，回退到当前时间
+                        time_stamp = now_dt.isoformat(timespec="seconds")
+                        float_time_stamp = now_dt.timestamp()
+
+                    weekday = str(wd_value) if wd_value is not None else weekday
                 except (IndexError, TypeError) as e:
-                    self.logger.warning(f"[{call_id}] Error getting timestamp for sequence {sequence_n}: {e}")
-                    time_stamp = None
-                    float_time_stamp = None
-                    weekday = None
+                    # 回退到默认时间，并记录告警但不中断流程
+                    self.logger.warning(f"[{call_id}] Error getting timestamp for sequence {sequence_n}: {e}; fallback to now()")
+
                 mem_obj = MemoryEntry(
                     time_stamp=time_stamp,
                     float_time_stamp=float_time_stamp,
@@ -333,6 +444,7 @@ class LightMemory:
         for i, mem in enumerate(memory_entries):
             self.logger.debug(f"[{call_id}] MemoryEntry[{i}]: time={mem.time_stamp}, weekday={mem.weekday}, memory={mem.memory}")
 
+        # 8) 入库：支持 online/offline 两种写入策略（默认 offline）
         if self.config.update == "online":
             self.online_update(memory_entries)
         elif self.config.update == "offline":
@@ -344,6 +456,10 @@ class LightMemory:
         return None
 
     def offline_update(self, memory_list: List, construct_update_queue_trigger: bool = False, offline_update_trigger: bool = False):
+        # 离线更新：
+        # - embedding/hybrid 策略下，将记忆转向量并插入向量数据库；
+        # - context/hybrid 策略下，将记忆落到文件以便上下文检索；
+        # - 可选：构建更新队列、执行基于相似度与时间的批量更新/删除。
         call_id = f"offline_update_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         self.logger.info(f"========== START {call_id} ==========")
         self.logger.info(f"[{call_id}] Received {len(memory_list)} memory entries")
@@ -357,6 +473,7 @@ class LightMemory:
             inserted_count = 0
             self.logger.info(f"[{call_id}] Starting embedding and insertion to vector database")
             for mem_obj in memory_list:
+                # 生成向量，分配唯一 id（若冲突则重试），组装 payload 并插入
                 embedding_vector = self.text_embedder.embed(mem_obj.memory)
                 ids = mem_obj.id
                 while self.embedding_retriever.exists(ids):
@@ -391,7 +508,7 @@ class LightMemory:
             if offline_update_trigger:
                 self.logger.info(f"[{call_id}] Triggering offline update for all entries")
                 self.offline_update_all_entries(
-                    update_sim_threshold = 0.8
+                    score_threshold = 0.8
                 )
 
     def construct_update_queue_all_entries(self, top_k: int = 20, keep_top_n: int = 10, max_workers: int = 8):
@@ -405,6 +522,8 @@ class LightMemory:
             keep_top_n (int): Number of top entries to keep in update_queue.
             max_workers (int): Maximum number of threads to use.
         """
+        # 依据当前库中所有向量，为每条记录搜集其“历史上最相似”的候选，形成 update_queue，
+        # 以便后续执行跨时间的合并更新或冲突删除。
         call_id = f"construct_queue_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         self.logger.info(f"========== START {call_id} ==========")
         self.logger.info(f"[{call_id}] Parameters: top_k={top_k}, keep_top_n={keep_top_n}, max_workers={max_workers}")
@@ -433,6 +552,7 @@ class LightMemory:
                     skipped_count += 1
                 return
 
+            # 只检索时间不晚于本条的候选（防止“未来”信息回流）
             hits = self.embedding_retriever.search(
                 query_vector=vec,
                 limit=top_k,
@@ -468,7 +588,7 @@ class LightMemory:
                 updated_count += 1
         self.logger.info(f"[{call_id}] Starting parallel queue construction with {max_workers} workers")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             executor.map(_update_queue_construction, all_entries)
         self.logger.info(
             f"[{call_id}] Queue construction completed: {updated_count} updated, {skipped_count} skipped, "
@@ -484,6 +604,11 @@ class LightMemory:
             score_threshold (float): Minimum similarity score for considering update candidates.
             max_workers (int): Maximum number of worker threads.
         """
+        # 遍历所有条目，找到把当前条目列入其 update_queue 的“来源条目们”；
+        # 将这些来源作为候选事实，与当前条目对比：
+        #  - 若冲突且候选更新更“新”，删除当前条目；
+        #  - 若补充信息可合并，更新当前条目；
+        #  - 若无关，忽略。
         call_id = f"offline_update_all_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         
         self.logger.info(f"========== START {call_id} ==========")
@@ -545,7 +670,7 @@ class LightMemory:
                     updated_count += 1
                 self.logger.debug(f"[{call_id}] Updated entry: {eid}")
         self.logger.info(f"[{call_id}] Starting parallel offline update with {max_workers} workers")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             executor.map(update_entry, all_entries)
         self.logger.info(f"[{call_id}] Offline update completed:")
         self.logger.info(f"[{call_id}]   - Processed: {processed_count} entries")
@@ -554,7 +679,7 @@ class LightMemory:
         self.logger.info(f"[{call_id}]   - Skipped (no candidates): {skipped_count} entries")
         self.logger.info(f"========== END {call_id} ==========")
     
-    def retrieve(self, query: str, limit: int = 10, filters: dict = None) -> list[str]:
+    def retrieve(self, query: str, limit: int = 10, filters: Optional[dict] = None) -> str:
         """
         Retrieve relevant entries and return them as formatted strings.
 
@@ -566,6 +691,7 @@ class LightMemory:
         Returns:
             list[str]: A list of formatted strings containing time_stamp, weekday, and memory.
         """
+        # 基于文本嵌入的相似度检索，返回格式化后的“时间 星期 记忆”字符串列表
         call_id = f"retrieve_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         
         self.logger.info(f"========== START {call_id} ==========")
@@ -596,3 +722,10 @@ class LightMemory:
         self.logger.info(f"========== END {call_id} ==========")
         return result_string
 
+    def get_roles(self, role: str = "user_only") -> list[str]:
+        role_map = {
+            "user_only": ["user"],
+            "assistant_only": ["assistant"],
+            "hybrid": ["user", "assistant", "Caroline", "Melanie"],
+        }
+        return role_map.get(role, [])

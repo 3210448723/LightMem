@@ -1,6 +1,6 @@
 from typing import Dict, Optional, List, Union, Any
 from transformers import PreTrainedTokenizerBase
-
+, Any
 from lightmem.configs.pre_compressor.llmlingua_2 import LlmLingua2Config
 
 
@@ -38,7 +38,7 @@ class LlmLingua2Compressor:
     def compress(
         self,
         messages: List[Dict[str, str]],
-        tokenizer: Union[PreTrainedTokenizerBase, Any, None],
+        tokenizer: Union[PreTrainedTokenizerBase, Any, Optional[Any]],
     ) -> List[Dict[str, str]]:
         # TODO: Consider adding an extra field in the message, compressed_content, and put the compressed content in this field while keeping content unchanged.
         """
@@ -59,24 +59,37 @@ class LlmLingua2Compressor:
 
             compress_config = {
                 'context': [content],
-                **self.config.compress_config
+                **self.config.compress_config  # compress_config['rate']=0.8 compress_config['target_token']=-1
             }
 
             try:
-                comp_content = self._compressor.compress_prompt(**compress_config)['compressed_prompt']
+                # Normalize compressor output to a string
+                result = self._compressor.compress_prompt(**compress_config)
+                if isinstance(result, dict) and 'compressed_prompt' in result:
+                    comp_content = result['compressed_prompt']
+                else:
+                    # Fallback: if the compressor returns a string directly
+                    comp_content = result if isinstance(result, str) else str(result)
+
+                # Iteratively compress until within token budget (when tokenizer is provided)
             except Exception as e:
                 print(f"compress error, skip this message: {e}")
                 comp_content = content  # Keep the original content if compression fails
 
             # Check if the compressed content is still too long
-            if tokenizer is not None:
+            if tokenizer is not None and isinstance(comp_content, str):
                 try:
                     while len(tokenizer.encode(comp_content)) >= 512 and comp_content.strip():
                         new_compress_config = {
-                            'context': comp_content,
+                    # LLMLingua expects a list for context
+                            'context': [comp_content],
                             **self.config.compress_config
                         }
-                        comp_content = self._compressor.compress_prompt(**new_compress_config)['compressed_prompt']
+                        result = self._compressor.compress_prompt(**new_compress_config)
+                    if isinstance(result, dict) and 'compressed_prompt' in result:
+                        comp_content = result['compressed_prompt']
+                    else:
+                        comp_content = result if isinstance(result, str) else str(result)
                 except Exception as e:
                     print(f"secondary compress error: {e}")
                     # If an error occurs, exit the loop and keep the current compression result

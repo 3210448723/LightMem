@@ -20,7 +20,7 @@ class LlmLingua2Segmenter:
             self.tokenizer = compressor.inner_compressor.tokenizer
             self.buffer_len = getattr(self.model.config, "max_position_embeddings", 512)
 
-        self.layers = self.config.get("layers", [8, 9, 10, 11])
+        self.layers = self.config.get("layers", [8, 9, 10, 11])  # 注意力源自 LLMLingua-2 的较高层（第 8、9、10 和 11 层）。
 
     def sentence_level_attention(self, buffer_texts: List[str]):
         model, tokenizer = self.model, self.tokenizer
@@ -104,10 +104,10 @@ class LlmLingua2Segmenter:
 
         return M
 
-    def propose_cut(self, buffer_texts: List[str]) -> Dict[str, Any]:
+    def propose_cut(self, buffer_texts: List[str]) -> list[int]:
         n = len(buffer_texts)
         if n == 0:
-            return {"boundaries": [0], "cut_index": 0}
+            return [0]
 
         M = self.sentence_level_attention(buffer_texts)
         outer = [M[i, i-1] for i in range(1, n)]
@@ -118,6 +118,7 @@ class LlmLingua2Segmenter:
                 boundaries.append(k)
 
         if not boundaries:
+            # TODO :
             boundaries = sorted(set(b for b in boundaries if 0 <= b <= n))
 
         return boundaries

@@ -7,42 +7,81 @@ import os
 from lightmem.memory.lightmem import LightMemory
 
 # ============ API Configuration ============
-API_KEY='your_api_key_here'
-API_BASE_URL=''
-LLM_MODEL='qwen3-30b-a3b-instruct-2507'
-JUDGE_MODEL='gpt-4o-mini'
+# 评测所用的大模型 API 配置：
+# - API_KEY / API_BASE_URL：你的推理服务密钥与基础 URL（可为空则使用默认）
+# - LLM_MODEL：主回答模型（用于生成最终答案）
+# - JUDGE_MODEL：评测判定模型（用于 Yes/No 判定）
+API_KEY='sk-n5HTCSKC9XsLtn2zwAdBxaPxF7ubNWgAxwapGJ5Buxd24G80'
+# API_BASE_URL='http://127.0.0.1:11434/v1'
+API_BASE_URL='http://100.78.197.38:16868/'
+# LLM_MODEL='qwen3-30b-a3b-instruct-2507'
+# LLM_MODEL='qwen2.5:3b'
+LLM_MODEL='QwQ-32B'
+# JUDGE_MODEL='gpt-4o-mini'
+JUDGE_MODEL='deepseek-v3'
 
 # ============ Model Paths ============
-LLMLINGUA_MODEL_PATH='/your/path/to/models/llmlingua-2-bert-base-multilingual-cased-meetingbank'
-EMBEDDING_MODEL_PATH='/your/path/to/models/all-MiniLM-L6-v2'
+# 本地/远端模型路径或名称：
+# - LLMLINGUA_MODEL_PATH：LLMLingua-2 压缩与分段模型路径
+# - EMBEDDING_MODEL_PATH：文本向量化模型路径（Sentence-Transformers 模型）
+LLMLINGUA_MODEL_PATH='microsoft/llmlingua-2-xlm-roberta-large-meetingbank'
+EMBEDDING_MODEL_PATH='all-MiniLM-L6-v2'
 
 # ============ Data Configuration ============
-DATA_PATH='/your/path/to/dataset/longmemeval/longmemeval_s.json'
+# 数据与结果存储：
+# - DATA_PATH：LongMemEval JSON 数据集路径
+# - RESULTS_DIR：结果输出目录
+# - QDRANT_DATA_DIR：Qdrant 本地存储目录（每个问题一个子集合，便于隔离）
+
+# 使用 memgas 统一规范化后的 locomo 和 longmemeavl 数据集格式
+# DATA_PATH='../dataset/process_data/locomo10.json'
+DATA_PATH='../dataset/process_data/longmemeval_s.json'
+
 RESULTS_DIR='../results'
 QDRANT_DATA_DIR='./qdrant_data'
 
 def get_anscheck_prompt(task, question, answer, response, abstention=False):
+    """
+    构造评测判定提示词：
+    - task 控制评测细则（如单会话/多会话/时间推理/知识更新/偏好），
+    - abstention=True 用于“不可回答”场景。
+    返回英文 prompt 字符串（严格保持原字符串模板不变）。
+    """
+    # 判断是否弃权，即不参与评估
     if not abstention:
+        # 根据不同的任务类型选择不同的提示模板
         if task in ['single-session-user', 'single-session-assistant', 'multi-session']:
+            # 单会话用户、单会话助手或多会话任务的模板
             template = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
         elif task == 'temporal-reasoning':
+            # 时间推理任务的模板，特别说明不惩罚天数的一误差
             template = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
         elif task == 'knowledge-update':
+            # 知识更新任务的模板，关注更新后的答案
             template = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
         elif task == 'single-session-preference':
+            # 单会话偏好任务的模板，关注个性化响应
             template = "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.\n\nQuestion: {}\n\nRubric: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
         else:
+            # 如果任务类型未实现，抛出未实现错误
             raise NotImplementedError
     else:
+        # 处理弃权情况，即问题不可回答的情况
         template = "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.\n\nQuestion: {}\n\nExplanation: {}\n\nModel Response: {}\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
         prompt = template.format(question, answer, response) 
+    # 返回生成的提示
     return prompt
 
 def true_or_false(response):
+    """
+    将评测模型输出归一化为布尔值：
+    - 解析首行，匹配 yes/no（含 y/n 简写或句中包含）。
+    - 任何无法判定的情况均返回 False。
+    """
     if response is None:
         return False
     normalized = str(response).strip().lower()
@@ -65,6 +104,11 @@ def true_or_false(response):
 
 
 class LLMModel:
+    """
+    简单的 ChatCompletions 包装：
+    - 支持重试、温度/采样参数；
+    - 仅用于本实验的“生成答案”和“判定评测”两个角色。
+    """
     def __init__(self, model_name, api_key, base_url):
         self.name = model_name
         self.api_key = api_key
@@ -96,6 +140,13 @@ class LLMModel:
                     raise
 
 def load_lightmem(collection_name):
+    """
+    构建 LightMemory 配置：
+    - 启用预压缩（LLMLingua-2）与主题分段；
+    - 使用 HuggingFace 向量器 + Qdrant 作为向量检索；
+    - memory_manager 走 OpenAI 风格接口（可兼容自建网关）。
+    注意：每个问题使用独立的 Qdrant collection，避免跨问题污染。
+    """
     config = {
         "pre_compress": True,
         "pre_compressor": {
@@ -113,7 +164,7 @@ def load_lightmem(collection_name):
         "topic_segmenter": {
             "model_name": "llmlingua-2",
         },
-        "messages_use": "user_only",
+        "messages_use": "user_only" if "locomo" not in DATA_PATH else "hybrid",
         "metadata_generate": True,
         "text_summary": True,
         "memory_manager": {
@@ -145,15 +196,19 @@ def load_lightmem(collection_name):
             }
         },
         "update": "offline",
+        "judge_only": True,  # 当试验结果存在且打算只做评测时，启用此选项
+        "use_llm_judge": True,  # 是否启用 LLM 评测判定
     }
-    lightmem = LightMemory.from_config(config)
+    if "judge_only" in config and config["judge_only"]:
+        config["use_llm_judge"] = True
+    lightmem = LightMemory.from_config(config)  # 从纯配置字典构造系统实例
     return lightmem
 
 llm_judge = LLMModel(JUDGE_MODEL, API_KEY, API_BASE_URL)
 llm = LLMModel(LLM_MODEL, API_KEY, API_BASE_URL)
 
 data = json.load(open(DATA_PATH, "r"))
-data = data[:10]
+# data = data[:10]
 
 INIT_RESULT = {
     "add_input_prompt": [],
@@ -162,27 +217,31 @@ INIT_RESULT = {
 }
 
 for item in tqdm(data):
-    print(item["question_id"])
-    lightmem = load_lightmem(collection_name=item["question_id"])
-    sessions = item["haystack_sessions"]
-    timestamps = item["haystack_dates"]
+    # 参照 memgas的格式化代码 统一规范化 locomo 和 longmemeavl 数据集格式
+    # 每个 conversation_id 独立构建记忆系统（独立向量库集合）
+    print("conversation_id:", item["conversation_id"])
+    lightmem = load_lightmem(collection_name=item["conversation_id"])
+    sessions = item["sessions"]
+    timestamps = item["sessions_dates"]
 
     results_list = []
 
     time_start = time.time()
     for session, timestamp in zip(sessions, timestamps):
-        while session and session[0]["role"] != "user":
+        # 清理会话起始非 user 轮次，保证 turn 对齐（user→assistant）
+        while session and session[0] and session[0]["role"] != "Caroline" and session[0]["role"] != "Melanie" and session[0]["role"] != "user":
             session.pop(0)
         num_turns = len(session) // 2  
         for turn_idx in range(num_turns):
             turn_messages = session[turn_idx*2 : turn_idx*2 + 2]
-            if len(turn_messages) < 2 or turn_messages[0]["role"] != "user" or turn_messages[1]["role"] != "assistant":
-                continue
+            # if len(turn_messages) < 2 or turn_messages[0]["role"] != "user" or turn_messages[1]["role"] != "assistant":
+            #     continue
             for msg in turn_messages:
                 msg["time_stamp"] = timestamp
             is_last_turn = (
                 session is sessions[-1] and turn_idx == num_turns - 1
             )
+            # 在会话末尾强制 segment/extract，避免残留在缓冲中
             result = lightmem.add_memory(
                 messages=turn_messages,
                 force_segment=is_last_turn,
@@ -194,38 +253,43 @@ for item in tqdm(data):
     time_end = time.time()
     construction_time = time_end - time_start
 
-    related_memories = lightmem.retrieve(item["question"], limit=20)
-    messages = []
-    messages.append({"role": "system", "content": "You are a helpful assistant."})
-    messages.append({
-        "role": "user",
-        "content": f"Question time:{item['question_date']} and question:{item['question']}\nPlease answer the question based on the following memories: {str(related_memories)}"
-    })
-    generated_answer = llm.call(messages)
+    for index, q in enumerate(item["qa"]):
+        # 检索相关记忆作为回答上下文（返回格式化字符串）
+        related_memories = lightmem.retrieve(q["question"], limit=20)
+        messages = []
+        messages.append({"role": "system", "content": "You are a helpful assistant."})
+        messages.append({
+            "role": "user",
+            "content": f"Question time:{q['question_date']} and question:{q['question']}\nPlease answer the question based on the following memories: {str(related_memories)}"
+        })
+        generated_answer = llm.call(messages)  # 主模型生成答案
 
-    if 'abs' in item["question_id"]:
-        prompt = get_anscheck_prompt(
-            item["question_type"], item["question"], item["answer"], generated_answer, abstention=True
-        )
-    else:
-        prompt = get_anscheck_prompt(
-            item["question_type"], item["question"], item["answer"], generated_answer
-        )
-    messages = [{"role": "user", "content": prompt}]
-    response = llm_judge.call(messages)
+        if lightmem.config.use_llm_judge:
+            if 'abs' in item["conversation_id"]:
+                prompt = get_anscheck_prompt(
+                    q["question_type"], q["question"], q["answer"], generated_answer, abstention=True
+                )
+            else:
+                prompt = get_anscheck_prompt(
+                    q["question_type"], q["question"], q["answer"], generated_answer
+                )
+            messages = [{"role": "user", "content": prompt}]
+            response = llm_judge.call(messages)  # 评测模型做 Yes/No 判定
+        else:
+            response = "Yes"
 
-    correct = 1 if true_or_false(response) else 0
+        correct = 1 if true_or_false(response) else 0  # 归一化为 0/1 指标
 
-    save_data = {
-        "question_id": item["question_id"],
-        "results": results_list,
-        "construction_time": construction_time,
-        "generated_answer": generated_answer,
-        "ground_truth": item["answer"],
-        "correct": correct,
-    }
+        save_data = {
+            "question_id": item["conversation_id"],
+            "results": results_list,
+            "construction_time": construction_time,
+            "generated_answer": generated_answer,
+            "ground_truth": q["answer"],
+            "correct": correct,
+        }
 
-    filename = f"../results/result_{item['question_id']}.json"
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(save_data, f, ensure_ascii=False, indent=4)
+        filename = f"../results/result_{item['conversation_id']}_{index}.json"  # 每题单独落盘，便于后续统计
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(save_data, f, ensure_ascii=False, indent=4)
