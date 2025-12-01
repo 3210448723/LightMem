@@ -132,7 +132,8 @@ def resolve_tokenizer(tokenizer_or_name: Union[str, Any]):
             "gpt-4.1": "o200k_base",
             "gpt-3.5-turbo": "cl100k_base",
             "qwen3-30b-a3b-instruct-2507": "o200k_base",
-            "qwen2.5:3b": "o200k_base"
+            "qwen2.5:3b": "o200k_base",
+            "QwQ-32B": "o200k_base"
         }
 
         if tokenizer_or_name not in model_tokenizer_map:

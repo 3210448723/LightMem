@@ -111,4 +111,8 @@ class BaseMemoryConfigs(BaseModel):
         default=None,
         description="Logging configuration for the LightMem system."
     )
+    use_llm_judge: Optional[bool] = Field(
+        default=True,
+        description="If True, use LLM to judge the quality of the retrieved messages; otherwise disable it."
+    )
 
