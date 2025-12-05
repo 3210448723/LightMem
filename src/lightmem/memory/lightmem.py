@@ -21,6 +21,7 @@ from lightmem.memory.utils import MemoryEntry, assign_sequence_numbers_with_time
 from lightmem.memory.prompts import METADATA_GENERATE_PROMPT, UPDATE_PROMPT
 from lightmem.configs.logging.utils import get_logger
 from concurrent.futures import ThreadPoolExecutor  # 使用显式导入，避免静态检查器无法解析 concurrent.futures
+from dateutil import parser # 需要 pip install python-dateutil
 
 # 说明：
 # 本模块实现 LightMemory 对话记忆系统的核心流程，包括：
@@ -58,11 +59,15 @@ class MessageNormalizer:
 
     def _parse_session_timestamp(self, raw_ts: str) -> Tuple[datetime, str]:
         """
-        Parse a session-level timestamp and return (base_datetime, weekday).
-        Supports formats like "2023/05/20 (Sat) 00:44" (also accepts '-' as separator, and optional seconds).
-        Raises ValueError if parsing fails.
+        Parse timestamp using dateutil for maximum compatibility.
+        Supports:
+        - "2023/05/20 (Sat) 00:44"
+        - "1:56 pm on 8 May, 2023"
+        - "May 8th 2023"
+        - ISO format, etc.
         """
-        # 优先尝试匹配预期格式（带星期的会话标记），否则回退尝试 ISO 格式
+        # 1. 优先尝试保留你的正则逻辑（为了性能和精确提取 weekday）
+        # 虽然 dateutil 也能解，但在已有严格格式的情况下，正则通常比猜测更快。
         m = self._SESSION_RE.search(raw_ts)
         if m:
             date_str = m.group('date').replace('-', '/')
@@ -76,6 +81,18 @@ class MessageNormalizer:
             dt = datetime.fromisoformat(raw_ts)
             return dt, dt.strftime("%a")
         except Exception:
+            pass
+
+        # 2. 通用回退方案：使用 dateutil
+        try:
+            # fuzzy=True 允许它忽略日期字符串中的未知干扰词（比如 "on" 有时即使不处理也能过，但在 strict 模式下可能报错）
+            # parser.parse 会自动处理 "pm", "May", ",", "8th" 等复杂情况
+            dt = parser.parse(raw_ts, fuzzy=True)
+            
+            # 自动计算星期几
+            return dt, dt.strftime("%a")
+            
+        except (ValueError, TypeError):
             raise ValueError(f"Failed to parse session time format: '{raw_ts}'. Expected something like '2023/05/20 (Sat) 00:44'")
 
     def normalize_messages(self, messages: Any) -> List[Dict[str, Any]]:
@@ -168,6 +185,9 @@ class LightMemory:
         self.logger.info("Initializing LightMemory with provided configuration")
         
         self.config = config
+
+        self.allowed_roles=self.get_roles(self.config.messages_use or 'user_only')  # 确保传入非 None，默认优先抽取用户侧
+
         if self.config.pre_compress:
             self.logger.info("Initializing pre-compressor")
             # 预压缩器：减少输入 token，提升后续分段与抽取效率
@@ -314,11 +334,11 @@ class LightMemory:
             }
 
         # 4) 感觉记忆缓冲：接收消息+分段器/嵌入器，返回片段列表
-        all_segments = self.senmem_buffer_manager.add_messages(compressed_messages, self.segmenter, self.text_embedder)
+        all_segments = self.senmem_buffer_manager.add_messages(compressed_messages, self.segmenter, self.text_embedder, self.allowed_roles)
 
         if force_segment:
             # 强制切分：通常用于会话末尾强制落盘
-            all_segments = self.senmem_buffer_manager.cut_with_segmenter(self.segmenter, self.text_embedder, force_segment)
+            all_segments = self.senmem_buffer_manager.cut_with_segmenter(self.segmenter, self.text_embedder, self.allowed_roles, force_segment)
         
         if not all_segments:
             self.logger.debug(f"[{call_id}] No segments generated, returning empty result")
@@ -330,7 +350,7 @@ class LightMemory:
         # 5) 短期记忆缓冲：根据策略/阈值触发抽取，将片段汇总成序列化的消息集合
         extract_trigger_num, extract_list = self.shortmem_buffer_manager.add_segments(
             all_segments,
-            self.config.messages_use or 'user_only',  # 确保传入非 None，默认优先抽取用户侧
+            self.allowed_roles,  # 确保传入非 None，默认优先抽取用户侧
             force_extract,
         )
 
@@ -349,7 +369,7 @@ class LightMemory:
         # 6) 元数据/事实抽取：调用大模型对抽取片段进行事实级汇总
         if self.config.metadata_generate and self.config.text_summary:
             self.logger.info(f"[{call_id}] Starting metadata generation")
-            extracted_results = self.manager.meta_text_extract(METADATA_GENERATE_PROMPT, extract_list, self.config.messages_use)
+            extracted_results = self.manager.meta_text_extract(METADATA_GENERATE_PROMPT, extract_list, self.allowed_roles)
             for item in extracted_results:
                 if item is not None:
                     result["add_input_prompt"].append(item["input_prompt"])
@@ -701,3 +721,10 @@ class LightMemory:
         self.logger.info(f"========== END {call_id} ==========")
         return result_string
 
+    def get_roles(self, role: str = "user_only") -> list[str]:
+        role_map = {
+            "user_only": ["user"],
+            "assistant_only": ["assistant"],
+            "hybrid": ["user", "assistant", "Caroline", "Melanie"],
+        }
+        return role_map.get(role, [])

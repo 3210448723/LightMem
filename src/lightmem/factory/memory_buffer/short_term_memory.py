@@ -15,15 +15,7 @@ class ShortMemBufferManager:
         self.buffer: List[List[Dict[str, Any]]] = [] 
         self.token_count: int = 0 
 
-    def _count_tokens(self, messages: List[Dict[str, Any]], messages_use: str) -> int:
-        # 根据策略决定计入 token 统计的角色
-        role_map = {
-            "user_only": ["user"],
-            "assistant_only": ["assistant"],
-            "hybrid": ["user", "assistant"],
-        }
-
-        allowed_roles = role_map.get(messages_use, [])
+    def _count_tokens(self, messages: List[Dict[str, Any]], allowed_roles: list[str]) -> int:
         text_list = [msg["content"] for msg in messages if msg["role"] in allowed_roles]
 
         text = " ".join(text_list)
@@ -41,7 +33,7 @@ class ShortMemBufferManager:
             raise TypeError("Invalid tokenizer type")
 
 
-    def add_segments(self, all_segments: List[List[Dict[str, Any]]], messages_use: str, force_extract: bool = False):
+    def add_segments(self, all_segments: List[List[Dict[str, Any]]], allowed_roles: list[str], force_extract: bool = False):
         """
         聚合片段并基于阈值触发：
         - 若加入某段会使 token 超过上限，则先输出当前缓冲为一个“抽取批次”，再从头计数；
@@ -53,7 +45,7 @@ class ShortMemBufferManager:
         trigger_num = 0
 
         for seg in all_segments:
-            tokens_needed = self._count_tokens(seg, messages_use)
+            tokens_needed = self._count_tokens(seg, allowed_roles)
             if self.token_count + tokens_needed > self.max_tokens:
                 if self.buffer:  
                     triggered.append(self.buffer.copy())

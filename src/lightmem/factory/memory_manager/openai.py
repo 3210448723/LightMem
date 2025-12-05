@@ -11,6 +11,7 @@ model_name_context_windows = {
     "gpt-4o-mini": 128000 ,
     "qwen3-30b-a3b-instruct-2507": 128000,
     "qwen2.5:3b": 32768,
+    "QwQ-32B": 131072,
 }
 
 class OpenaiManager:
@@ -142,7 +143,7 @@ class OpenaiManager:
         self,
         system_prompt: str,
         extract_list: List[List[List[Dict]]],
-        messages_use: Literal["user_only", "assistant_only", "hybrid"] = "user_only"
+        allowed_roles: list[str] = ["user"]
     ) -> List[Optional[Dict]]:
         """
     使用并行处理从文本片段中抽取元数据（事实）。
@@ -158,18 +159,8 @@ class OpenaiManager:
         if not extract_list:
             return []
             
-        def concatenate_messages(segment: List[Dict], messages_use: str) -> str:
+        def concatenate_messages(segment: List[Dict]) -> str:
             """Concatenate messages based on usage strategy"""
-            role_filter = {
-                "user_only": {"user"},
-                "assistant_only": {"assistant"},
-                "hybrid": {"user", "assistant"}
-            }
-
-            if messages_use not in role_filter:
-                raise ValueError(f"Invalid messages_use value: {messages_use}")
-
-            allowed_roles = role_filter[messages_use]
             message_lines = []
 
             for mes in segment:
@@ -188,7 +179,7 @@ class OpenaiManager:
             try:
                 user_prompt_parts = []
                 for idx, topic_segment in enumerate(api_call_segments, start=1):
-                    topic_text = concatenate_messages(topic_segment, messages_use)
+                    topic_text = concatenate_messages(topic_segment)
                     user_prompt_parts.append(f"--- Topic {idx} ---\n{topic_text}")
 
                 user_prompt = "\n".join(user_prompt_parts)

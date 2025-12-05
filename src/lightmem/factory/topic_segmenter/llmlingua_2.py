@@ -104,10 +104,10 @@ class LlmLingua2Segmenter:
 
         return M
 
-    def propose_cut(self, buffer_texts: List[str]) -> Dict[str, Any]:
+    def propose_cut(self, buffer_texts: List[str]) -> list[int]:
         n = len(buffer_texts)
         if n == 0:
-            return {"boundaries": [0], "cut_index": 0}
+            return [0]
 
         M = self.sentence_level_attention(buffer_texts)
         outer = [M[i, i-1] for i in range(1, n)]
@@ -118,6 +118,7 @@ class LlmLingua2Segmenter:
                 boundaries.append(k)
 
         if not boundaries:
+            # TODO :
             boundaries = sorted(set(b for b in boundaries if 0 <= b <= n))
 
         return boundaries
