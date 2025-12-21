@@ -7,6 +7,7 @@ import json, os, warnings
 import httpx
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.utils import clean_response
+from lightmem.utils.llm_cache import llm_cache
 
 model_name_context_windows = {
     "gpt-4o-mini": 128000,
@@ -62,6 +63,16 @@ class OpenaiManager:
             )
 
             self.client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+
+    @llm_cache(key_prefix="openai_chat")
+    def _call_api(self, **params):
+        """
+        带缓存的底层 API 调用方法。
+        
+        参数相同时会命中缓存，无需重复请求。
+        报错的请求不会被缓存。
+        """
+        return self.client.chat.completions.create(**params)
 
     def _parse_response(self, response, tools):
         """
@@ -142,7 +153,7 @@ class OpenaiManager:
             params["tools"] = tools
             params["tool_choice"] = tool_choice
 
-        response = self.client.chat.completions.create(**params)
+        response = self._call_api(**params)
         usage_info = {
             "prompt_tokens": response.usage.prompt_tokens,
             "completion_tokens": response.usage.completion_tokens,
@@ -174,7 +185,7 @@ class OpenaiManager:
         if not extract_list:
             return []
         
-        def concatenate_messages(segment: List[Dict]) -> str:
+        def concatenate_messages(segment: List[Dict], allowed_roles: List[str]) -> str:
             """Concatenate messages based on usage strategy"""
             message_lines = []
 
@@ -215,7 +226,7 @@ class OpenaiManager:
                     else:
                         global_topic_id = topic_idx + 1
                     
-                    topic_text = concatenate_messages(topic_segment, messages_use)
+                    topic_text = concatenate_messages(topic_segment, allowed_roles)
                     user_prompt_parts.append(f"--- Topic {global_topic_id} ---\n{topic_text}")
 
                 print(f"User prompt for API call {api_call_idx}:\n" + "\n".join(user_prompt_parts))
@@ -234,18 +245,14 @@ class OpenaiManager:
                 return {
                     "input_prompt": metadata_messages,
                     "output_prompt": raw_response,
-                    "cleaned_result": metadata_facts,
+                    "cleaned_result": cleaned_result,
                     "usage": usage_info,
                 }
                 
             except Exception as e:
                 print(f"Error processing API call {api_call_idx}: {e}")
                 # When error occurs, return empty but full structure
-                return {
-                    "input_prompt": [],
-                    "output_prompt": "",
-                    "cleaned_result": [],
-                }
+                return None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             try:

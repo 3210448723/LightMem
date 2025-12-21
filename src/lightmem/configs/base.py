@@ -115,4 +115,18 @@ class BaseMemoryConfigs(BaseModel):
         default=True,
         description="If True, use LLM to judge the quality of the retrieved messages; otherwise disable it."
     )
+    locomo_style: Optional[bool] = Field(
+        default=False,
+        description="If True, enable LocoMo style memory management; otherwise disable it."
+    )
+    # 当试验结果存在且打算只做评测时，启用此选项
+    judge_only: Optional[bool] = Field(
+        default=False,
+        description="If True, only perform evaluation on existing results; otherwise proceed with normal operation."
+    )
+    # 是否启用 LLM 评测判定回答结果
+    use_llm_judge: Optional[bool] = Field(
+        default=True,
+        description="If True, use LLM to judge the quality of the answers; otherwise disable it."
+    )
 

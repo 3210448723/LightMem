@@ -29,26 +29,27 @@ class SenMemBufferManager:
         - assistant 侧消息不占用 token 上限，直接并行推进（保持轮次结构）。
         返回收集到的全部片段。
         """
-        # TODO : 应该 overlap：即将最后一个主题所属的消息放回缓冲区，避免主题切分过多，并且相同主题一起提取元事实更好。
         all_segments = []
         self.big_buffer.extend(messages)
 
         while self.big_buffer:
+            processed_messages = []
             for msg in self.big_buffer:
                 if msg["role"] in allowed_roles:
                     cur_token_count = len(self.tokenizer.encode(msg["content"]))  # type: ignore[union-attr]
                     if self.token_count + cur_token_count <= self.max_tokens:
                         self.buffer.append(msg)
                         self.token_count += cur_token_count
-                        self.big_buffer.remove(msg)
+                        processed_messages.append(msg)
                     else:
                         segments = self.cut_with_segmenter(segmenter, text_embedder, allowed_roles)  # type: ignore[attr-defined]
                         all_segments.extend(segments)
                         break
                 else:
                     self.buffer.append(msg)
-                    self.big_buffer.remove(msg)
-
+                    processed_messages.append(msg)
+            for msg in processed_messages:
+                self.big_buffer.remove(msg)
         return all_segments  # type: ignore[return-value]
 
     def should_trigger(self) -> bool:

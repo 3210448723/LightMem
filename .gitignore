@@ -221,3 +221,8 @@ dataset/
 results/
 results_locomo/
 results_longmemeval/
+
+experiments/locomo/logs
+experiments/locomo/qdrant_post_update
+experiments/locomo/qdrant_pre_update
+experiments/locomo/qwenq

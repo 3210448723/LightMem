@@ -86,6 +86,13 @@ def main():
         default="results/default_run_v4_k30_new_graph.json",
         help="Path to the input dataset file",
     )
+    # model_name = "gpt-4o-mini"
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="deepseek-v3",
+        help="Model to use for judging",
+    )
 
     args = parser.parse_args()
 
@@ -111,7 +118,7 @@ def main():
                 continue
 
             # Evaluate the answer
-            label = evaluate_llm_judge(question, gold_answer, generated_answer)
+            label = evaluate_llm_judge(question, gold_answer, generated_answer, args.model_name)
             LLM_JUDGE[category].append(label)
 
             # Store the results
