@@ -205,7 +205,7 @@ def load_lightmem(collection_name):
     lightmem = LightMemory.from_config(config)  # 从纯配置字典构造系统实例
     return lightmem
 
-llm_judge = LLMModel(JUDGE_MODEL, API_KEY, API_BASE_URL)
+llm_judge = LLMModel(JUDGE_MODEL, JUDGE_MODEL_API_KEY, JUDGE_MODEL_BASE_URL)
 llm = LLMModel(LLM_MODEL, API_KEY, API_BASE_URL)
 
 data = json.load(open(DATA_PATH, "r"))

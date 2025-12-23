@@ -172,6 +172,7 @@ class LightMemory:
             - segmenter (optional): Topic segmentation model if topic_segment=True
             - manager: Memory management model for metadata generation and text summarization
             - text_embedder (optional): Text embedding model if index_strategy is 'embedding' or 'hybrid'
+            - retrieve_strategy (optional): Retrieval strategy ('context', 'embedding', or 'hybrid')
             - context_retriever (optional): Context-based retriever if retrieve_strategy is 'context' or 'hybrid'
             - embedding_retriever (optional): Embedding-based retriever if retrieve_strategy is 'embedding' or 'hybrid'
             - graph (optional): Graph memory store if graph_mem is enabled
@@ -227,7 +228,8 @@ class LightMemory:
             assert self.config.text_embedder is not None, "text_embedder config should not be None when index_strategy includes 'embedding'"
             self.text_embedder = TextEmbedderFactory.from_config(self.config.text_embedder)  # type: ignore[arg-type]
         # if self.config.multimodal_embedder:
-        if self.config.retrieve_strategy in ["context", "hybrid"]:
+        self.retrieve_strategy = self.config.retrieve_strategy
+        if self.retrieve_strategy in ["context", "hybrid"]:
             self.logger.info("Initializing context retriever")
             # 基于上下文的检索器（例如从文件中召回）
             assert self.config.context_retriever is not None, "context_retriever config should not be None when retrieve_strategy includes 'context'"
@@ -258,6 +260,7 @@ class LightMemory:
     def add_memory(
         self,
         messages,
+        METADATA_GENERATE_PROMPT,
         *,
         force_segment: bool = False, 
         force_extract: bool = False
@@ -394,13 +397,35 @@ class LightMemory:
         # 6) 元数据/事实抽取：调用大模型对抽取片段进行事实级汇总
         if self.config.metadata_generate and self.config.text_summary:
             self.logger.info(f"[{call_id}] Starting metadata generation")
-            prompt = METADATA_GENERATE_PROMPT_locomo if self.config.locomo_style else METADATA_GENERATE_PROMPT
-            extracted_results = self.manager.meta_text_extract(prompt, extract_list, self.allowed_roles)
-            for item in extracted_results:
-                if item is not None:
-                    result["add_input_prompt"].append(item["input_prompt"])
-                    result["add_output_prompt"].append(item["output_prompt"])
-                    result["api_call_nums"] += 1
+            extracted_results = self.manager.meta_text_extract(METADATA_GENERATE_PROMPT, extract_list, self.config.messages_use, topic_id_mapping)
+        
+            # =============API Consumption======================
+            for idx, item in enumerate(extracted_results):
+                if item is None:
+                    continue
+                
+                if "usage" in item:
+                    usage = item["usage"]
+                    self.token_stats["add_memory_calls"] += 1
+                    self.token_stats["add_memory_prompt_tokens"] += usage.get("prompt_tokens", 0)
+                    self.token_stats["add_memory_completion_tokens"] += usage.get("completion_tokens", 0)
+                    self.token_stats["add_memory_total_tokens"] += usage.get("total_tokens", 0)
+                    
+                    self.logger.info(
+                        f"[{call_id}] API Call {idx} tokens - "
+                        f"Prompt: {usage.get('prompt_tokens', 0)}, "
+                        f"Completion: {usage.get('completion_tokens', 0)}, "
+                        f"Total: {usage.get('total_tokens', 0)}"
+                    )
+                    
+                self.logger.debug(f"[{call_id}] API Call {idx} raw output: {item['output_prompt']}")
+                self.logger.debug(f"[{call_id}] API Call {idx} cleaned result: {item['cleaned_result']}")
+                result["add_input_prompt"].append(item["input_prompt"])
+                result["add_output_prompt"].append(item["output_prompt"])
+                result["api_call_nums"] += 1
+
+            # =======================================
+            
             self.logger.info(f"[{call_id}] Metadata generation completed with {result['api_call_nums']} API calls")
 
         memory_entries = convert_extraction_results_to_memory_entries(
@@ -688,7 +713,7 @@ class LightMemory:
         )
         self.logger.info(f"========== END {call_id} ==========")
     
-    def retrieve(self, query: str, limit: int = 10, filters: Optional[dict] = None) -> str:
+    def retrieve(self, query: str, limit: int = 10, filters: Optional[dict] = None) -> list[str]:
         """
         Retrieve relevant entries and return them as formatted strings.
 

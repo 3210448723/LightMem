@@ -251,8 +251,12 @@ class OpenaiManager:
                 
             except Exception as e:
                 print(f"Error processing API call {api_call_idx}: {e}")
-                # When error occurs, return empty but full structure
-                return None
+                return {
+                    "input_prompt": [],
+                    "output_prompt": "",
+                    "cleaned_result": [],
+                    "usage": None,
+                }
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             try:

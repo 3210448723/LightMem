@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """
 LightMem LOCOMO 数据集记忆构建模块
 
@@ -36,6 +37,7 @@ import logging  # 日志记录
 from lightmem.memory.lightmem import LightMemory  # LightMem 核心记忆类
 from lightmem.configs.retriever.embeddingretriever.qdrant import QdrantConfig  # Qdrant 配置类
 from lightmem.factory.retriever.embeddingretriever.qdrant import Qdrant  # Qdrant 向量检索器
+from prompts import METADATA_GENERATE_PROMPT_locomo  # LOCOMO 专用元数据生成提示语
 import sqlite3  # SQLite 数据库接口（用于读取 Qdrant 存储信息）
 import shutil  # 文件/目录操作
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed  # 并行处理
@@ -46,6 +48,25 @@ import multiprocessing as mp  # 多进程支持
 # 本区域定义了所有可配置的参数，修改这些参数可以调整系统行为
 # -------------------- 日志配置 --------------------
 # 日志根目录，所有运行日志将存储在此目录下
+=======
+from openai import OpenAI
+import json
+from tqdm import tqdm
+import datetime
+import time
+import os
+import logging
+from lightmem.memory.lightmem import LightMemory
+from lightmem.configs.retriever.embeddingretriever.qdrant import QdrantConfig
+from lightmem.factory.retriever.embeddingretriever.qdrant import Qdrant
+from prompts import METADATA_GENERATE_PROMPT_locomo
+import sqlite3
+import shutil
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import multiprocessing as mp
+
+# ============ Configuration ============
+>>>>>>> 70437d4545d41981a7ce1b0a4b6998b4ad0bc3f3
 LOGS_ROOT = "./logs"
 # 每次运行创建独立的时间戳目录，便于追溯和管理
 RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -583,6 +604,7 @@ def process_single_sample(sample, api_key, gpu_id):
                 # force_extract: 强制执行记忆提取
                 lightmem.add_memory(
                     messages=turn_messages,
+                    METADATA_GENERATE_PROMPT=METADATA_GENERATE_PROMPT_locomo,
                     force_segment=is_last_turn,
                     force_extract=is_last_turn,
                 )
