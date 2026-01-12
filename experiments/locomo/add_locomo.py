@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 """
 LightMem LOCOMO 数据集记忆构建模块
 
@@ -48,25 +47,6 @@ import multiprocessing as mp  # 多进程支持
 # 本区域定义了所有可配置的参数，修改这些参数可以调整系统行为
 # -------------------- 日志配置 --------------------
 # 日志根目录，所有运行日志将存储在此目录下
-=======
-from openai import OpenAI
-import json
-from tqdm import tqdm
-import datetime
-import time
-import os
-import logging
-from lightmem.memory.lightmem import LightMemory
-from lightmem.configs.retriever.embeddingretriever.qdrant import QdrantConfig
-from lightmem.factory.retriever.embeddingretriever.qdrant import Qdrant
-from prompts import METADATA_GENERATE_PROMPT_locomo
-import sqlite3
-import shutil
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-import multiprocessing as mp
-
-# ============ Configuration ============
->>>>>>> 70437d4545d41981a7ce1b0a4b6998b4ad0bc3f3
 LOGS_ROOT = "./logs"
 # 每次运行创建独立的时间戳目录，便于追溯和管理
 RUN_TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -35,9 +35,9 @@ logging.basicConfig(
 logger = logging.getLogger("vector_baseline")
 
 # Default paths (can be overridden by command line arguments)
-DEFAULT_DATA_PATH = '/path/to/locomo_dataset.json'
+DEFAULT_DATA_PATH = '/home/user/yuanjinmin/LightMem/dataset/origin_data/locomo10.json'
 DEFAULT_QDRANT_DIR = './qdrant_pre_update' 
-DEFAULT_EMBEDDING_MODEL_PATH = '/path/to/embedding-model'
+DEFAULT_EMBEDDING_MODEL_PATH = 'all-MiniLM-L6-v2'
 DEFAULT_RESULTS_DIR = './lightmem_locomo_results'
 DEFAULT_RETRIEVAL_LIMIT = 60
 

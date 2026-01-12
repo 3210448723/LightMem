@@ -260,7 +260,7 @@ class LightMemory:
     def add_memory(
         self,
         messages,
-        METADATA_GENERATE_PROMPT,
+        METADATA_GENERATE_PROMPT: Optional[str] = None,
         *,
         force_segment: bool = False, 
         force_extract: bool = False
@@ -302,6 +302,11 @@ class LightMemory:
               weekdays, and extracted factual content.
             - Depending on `self.config.update`, the function triggers either online or offline memory updates.
         """
+
+        if METADATA_GENERATE_PROMPT is None:
+            from lightmem.memory.prompts import METADATA_GENERATE_PROMPT as DEFAULT_PROMPT
+            METADATA_GENERATE_PROMPT = DEFAULT_PROMPT
+            
         # 注意：该函数是构建记忆流水线的入口。除返回结果字典外，真正的记忆条目会在离线/在线更新阶段入库。
         call_id = f"add_memory_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         self.logger.info(f"========== START {call_id} ==========")
