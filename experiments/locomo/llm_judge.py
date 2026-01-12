@@ -4,9 +4,7 @@ from collections import defaultdict
 import re   
 import numpy as np
 from openai import OpenAI
-
-
-client = OpenAI()
+from lightmem.utils.llm_cache import llm_cache
 
 def extract_json(text):
     """
@@ -49,18 +47,9 @@ Just return the label CORRECT or WRONG in a json format with the key as "label".
 """
 
 
-def evaluate_llm_judge(question, gold_answer, generated_answer, client_obj=None, model_name="gpt-4o-mini"):
-    """Evaluate the generated answer against the gold answer using an LLM judge.
-
-    Args:
-        question: the question string
-        gold_answer: the ground-truth answer string
-        generated_answer: the model's generated answer string
-        client_obj: optional OpenAI client instance (useful to pass configured client with custom base_url)
-        model_name: model to use for judging (default gpt-4o-mini)
-    """
-    used_client = client_obj if client_obj is not None else client
-    response = used_client.chat.completions.create(
+@llm_cache(key_prefix="locomo_judge")
+def _llm_judge_cached(question, gold_answer, generated_answer, client_obj, model_name):
+    response = client_obj.chat.completions.create(
         model=model_name,
         messages=[
             {
@@ -73,6 +62,20 @@ def evaluate_llm_judge(question, gold_answer, generated_answer, client_obj=None,
         response_format={"type": "json_object"},
         temperature=0.0,
     )
+    return response
+
+def evaluate_llm_judge(question, gold_answer, generated_answer, client_obj=None, model_name="gpt-4o-mini"):
+    """Evaluate the generated answer against the gold answer using an LLM judge.
+
+    Args:
+        question: the question string
+        gold_answer: the ground-truth answer string
+        generated_answer: the model's generated answer string
+        client_obj: optional OpenAI client instance (useful to pass configured client with custom base_url)
+        model_name: model to use for judging (default gpt-4o-mini)
+    """
+    used_client = client_obj if client_obj is not None else OpenAI()
+    response = _llm_judge_cached(question, gold_answer, generated_answer, used_client, model_name)
     label = json.loads(extract_json(response.choices[0].message.content))["label"]
     return 1 if label == "CORRECT" else 0
 

@@ -13,7 +13,7 @@ import os
 import pickle
 import threading
 import functools
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional
 from pathlib import Path
 import logging
 
@@ -99,7 +99,8 @@ class LLMCache:
         self,
         cache_dir: Optional[str] = None,
         storage_mode: str = "file",
-        enabled: bool = True
+        enabled: bool = True,
+        cache_policy: str = "normal",
     ):
         """
         初始化缓存管理器。
@@ -116,6 +117,7 @@ class LLMCache:
         self._cache_lock = threading.Lock()
         self._enabled = enabled
         self._storage_mode = storage_mode
+        self._cache_policy = _normalize_cache_policy(cache_policy)
         
         if cache_dir is None:
             self._cache_dir = Path.home() / ".lightmem" / "llm_cache"
@@ -132,7 +134,23 @@ class LLMCache:
         }
         
         self._initialized = True
-        logger.info(f"LLMCache initialized: mode={storage_mode}, dir={self._cache_dir}, enabled={enabled}")
+        logger.info(
+            "LLMCache initialized: mode=%s, dir=%s, enabled=%s, policy=%s",
+            storage_mode,
+            self._cache_dir,
+            enabled,
+            self._cache_policy,
+        )
+
+    @property
+    def cache_policy(self) -> str:
+        """缓存策略：normal(读写)、refresh(不读但写/覆盖)、off(不读不写)。"""
+        return self._cache_policy
+
+    @cache_policy.setter
+    def cache_policy(self, value: str):
+        self._cache_policy = _normalize_cache_policy(value)
+        logger.info(f"LLMCache cache_policy set to: {self._cache_policy}")
     
     @property
     def enabled(self) -> bool:
@@ -279,7 +297,8 @@ _global_cache: Optional[LLMCache] = None
 def get_cache(
     cache_dir: Optional[str] = None,
     storage_mode: str = "file",
-    enabled: bool = True
+    enabled: bool = True,
+    cache_policy: str = "normal",
 ) -> LLMCache:
     """
     获取全局缓存实例。
@@ -297,15 +316,26 @@ def get_cache(
         _global_cache = LLMCache(
             cache_dir=cache_dir,
             storage_mode=storage_mode,
-            enabled=enabled
+            enabled=enabled,
+            cache_policy=cache_policy,
         )
     return _global_cache
+
+
+def _normalize_cache_policy(policy: str) -> str:
+    if policy is None:
+        return "normal"
+    policy = str(policy).strip().lower()
+    if policy in {"normal", "refresh", "off"}:
+        return policy
+    raise ValueError(f"Invalid cache_policy: {policy}. Expected one of: normal, refresh, off")
 
 
 def llm_cache(
     cache_instance: Optional[LLMCache] = None,
     key_prefix: str = "",
-    exclude_params: Optional[list] = None
+    exclude_params: Optional[list] = None,
+    cache_policy: Optional[str] = None,
 ) -> Callable:
     """
     LLM 请求缓存装饰器。
@@ -333,7 +363,14 @@ def llm_cache(
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             cache = cache_instance or get_cache()
+
+            effective_policy = _normalize_cache_policy(cache_policy or getattr(cache, "cache_policy", "normal"))
+
+            # off：完全绕过缓存（不读不写）
+            if effective_policy == "off":
+                return func(*args, **kwargs)
             
+            # enabled=false：保持旧行为（不读不写）
             if not cache.enabled:
                 return func(*args, **kwargs)
             
@@ -364,23 +401,37 @@ def llm_cache(
             
             # 生成缓存键
             cache_key = f"{key_prefix}_{_compute_cache_key(*cache_args, **filtered_kwargs)}"
-            
-            # 尝试从缓存获取
-            cached_result = cache.get(cache_key)
-            if cached_result is not None:
-                logger.debug(f"[LLMCache] Cache hit for {func.__name__}")
-                return cached_result
+
+            # normal：尝试从缓存获取；refresh：跳过读取
+            if effective_policy == "normal":
+                cached_result = cache.get(cache_key)
+                if cached_result is not None:
+                    logger.debug(f"[LLMCache] Cache hit for {func.__name__}")
+                    return cached_result
             
             # 执行原函数
             try:
                 result = func(*args, **kwargs)
                 # 成功执行后存入缓存
-                # 判断，如果大模型输出结果为空就不保存
-                if result and len(result.choices[0].message.content)>0:
-                    cache.set(cache_key, result)
-                    logger.debug(f"[LLMCache] Cached result for {func.__name__}")
+                # 判断：如果大模型输出结果为空就不保存
+                should_cache = False
+                if result is None:
+                    should_cache = False
+                elif hasattr(result, "choices"):
+                    try:
+                        content = result.choices[0].message.content
+                        should_cache = bool(content)
+                    except Exception:
+                        # 非标准结构时，退化为 truthy 即缓存
+                        should_cache = True
                 else:
-                    logger.debug(f"[LLMCache] Result empty, not caching for {func.__name__}")    
+                    should_cache = True
+
+                if should_cache:
+                    cache.set(cache_key, result)
+                    logger.debug(f"[LLMCache] Cached result for {func.__name__} (policy={effective_policy})")
+                else:
+                    logger.debug(f"[LLMCache] Result empty, not caching for {func.__name__}")
                 return result
             except Exception as e:
                 # 报错不缓存
@@ -395,7 +446,8 @@ def llm_cache(
 def configure_llm_cache(
     enabled: bool = True,
     cache_dir: Optional[str] = None,
-    storage_mode: str = "file"
+    storage_mode: str = "file",
+    cache_policy: str = "normal",
 ) -> LLMCache:
     """
     配置全局 LLM 缓存。
@@ -412,6 +464,7 @@ def configure_llm_cache(
     _global_cache = LLMCache(
         cache_dir=cache_dir,
         storage_mode=storage_mode,
-        enabled=enabled
+        enabled=enabled,
+        cache_policy=cache_policy,
     )
     return _global_cache

@@ -9,6 +9,9 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import argparse
 
+from lightmem.utils.llm_cache import llm_cache
+from lightmem import configure_llm_cache
+
 from lightmem.factory.text_embedder.huggingface import TextEmbedderHuggingface
 from lightmem.factory.text_embedder.openai import TextEmbedderOpenAI
 from lightmem.configs.text_embedder.base_config import BaseTextEmbedderConfig
@@ -40,6 +43,29 @@ DEFAULT_QDRANT_DIR = './qdrant_pre_update'
 DEFAULT_EMBEDDING_MODEL_PATH = 'all-MiniLM-L6-v2'
 DEFAULT_RESULTS_DIR = './lightmem_locomo_results'
 DEFAULT_RETRIEVAL_LIMIT = 60
+DEFAULT_LLM_CACHE_POLICY = 'refresh'
+
+
+# ============ LLM Cache ============
+# 说明：
+# - 使用装饰器为大模型请求增加缓存（输入/输出）。
+# - 参数一致时直接命中缓存，不再重复请求。
+# - 若请求抛异常则不会写入缓存（满足“报错不存储”）。
+_GLOBAL_LLM_CLIENT: Optional[OpenAI] = None
+_GLOBAL_JUDGE_CLIENT: Optional[OpenAI] = None
+
+
+@llm_cache(key_prefix="locomo_answer")
+def _cached_answer_completion(*, model: str, prompt: str, temperature: float) -> Dict[str, Any]:
+    if _GLOBAL_LLM_CLIENT is None:
+        raise RuntimeError("LLM client not initialized")
+    return _GLOBAL_LLM_CLIENT.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": prompt}
+        ],
+        temperature=temperature,
+    )
 
 
 # ============ Dataset Parsing ============
@@ -362,28 +388,28 @@ def process_sample(
         }
         
         try:
-            response = llm_client.chat.completions.create(
-                model=llm_model,
-                messages=[
-                    {"role": "system", "content": user_prompt}
-                ],
-                temperature=0.0
-            )
-            
+            response = _cached_answer_completion(model=llm_model, prompt=user_prompt, temperature=0.0)
+
             generated_answer = response.choices[0].message.content
-            
-            # Record token usage
-            if hasattr(response, 'usage') and response.usage:
-                token_usage['prompt_tokens'] = response.usage.prompt_tokens
-                token_usage['completion_tokens'] = response.usage.completion_tokens
-                token_usage['total_tokens'] = response.usage.total_tokens
-                
+            usage = None
+            if hasattr(response, "usage") and response.usage:
+                usage = {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens,
+                }
+
+            if isinstance(usage, dict):
+                token_usage['prompt_tokens'] = usage.get("prompt_tokens", 0)
+                token_usage['completion_tokens'] = usage.get("completion_tokens", 0)
+                token_usage['total_tokens'] = usage.get("total_tokens", 0)
+
                 # Update sample statistics
                 sample_token_stats['total_prompt_tokens'] += token_usage['prompt_tokens']
                 sample_token_stats['total_completion_tokens'] += token_usage['completion_tokens']
                 sample_token_stats['total_tokens'] += token_usage['total_tokens']
                 sample_token_stats['api_calls'] += 1
-                
+
                 logger.info(
                     f"[{sample_id}] Token usage - Prompt: {token_usage['prompt_tokens']}, "
                     f"Completion: {token_usage['completion_tokens']}, "
@@ -397,9 +423,14 @@ def process_sample(
         
         # Evaluate with LLM judge
         try:
+            if _GLOBAL_JUDGE_CLIENT is None:
+                raise RuntimeError("Judge client not initialized")
             label = evaluate_llm_judge(
-                question, reference, generated_answer,
-                client_obj=judge_client, model_name=judge_model
+                question,
+                reference,
+                generated_answer,
+                client_obj=_GLOBAL_JUDGE_CLIENT,
+                model_name=judge_model,
             )
             metrics = {
                 'judge_correct': int(label),
@@ -466,18 +497,27 @@ def main():
                        help="Path to embedding model (for huggingface backend)")
     
     # LLM configuration
-    parser.add_argument('--llm-api-key', type=str, required=True,
+    parser.add_argument('--llm-api-key', type=str, default="test",
                        help="API key for LLM")
-    parser.add_argument('--llm-base-url', type=str, required=True,
+    parser.add_argument('--llm-base-url', type=str, default="http://100.108.19.27:16868/",
                        help="Base URL for LLM API")
-    parser.add_argument('--llm-model', type=str, required=True,
+    parser.add_argument('--llm-model', type=str, default="QwQ-32B",
                        help="LLM model name")
-    parser.add_argument('--judge-api-key', type=str, required=True,
+    parser.add_argument('--judge-api-key', type=str, default="test",
                        help="API key for judge")
-    parser.add_argument('--judge-base-url', type=str, required=True,
+    parser.add_argument('--judge-base-url', type=str, default="http://100.108.19.27:16868/",
                        help="Base URL for judge API")
-    parser.add_argument('--judge-model', type=str, required=True,
+    parser.add_argument('--judge-model', type=str, default="deepseek-v3",
                        help="Judge model name")
+
+    # Cache configuration
+    parser.add_argument(
+        '--llm-cache-policy',
+        type=str,
+        choices=['normal', 'refresh', 'off'],
+        default=DEFAULT_LLM_CACHE_POLICY,
+        help="LLM cache policy: normal=read+write; refresh=skip read, overwrite write; off=disable",
+    )
     
     args = parser.parse_args()
     
@@ -498,6 +538,7 @@ def main():
     logger.info(f"  Embedder:        {args.embedder}")
     logger.info(f"  LLM model:       {args.llm_model}")
     logger.info(f"  Judge model:     {args.judge_model}")
+    logger.info(f"  Cache policy:    {args.llm_cache_policy}")
     logger.info("=" * 80)
     
     # Create output directory
@@ -529,6 +570,16 @@ def main():
     # Create LLM clients
     llm_client = OpenAI(api_key=args.llm_api_key, base_url=args.llm_base_url)
     judge_client = OpenAI(api_key=args.judge_api_key, base_url=args.judge_base_url)
+
+    # 初始化全局缓存与全局 client（用于装饰器缓存函数）
+    configure_llm_cache(
+        enabled=(args.llm_cache_policy != 'off'),
+        storage_mode="file",
+        cache_policy=args.llm_cache_policy,
+    )
+    global _GLOBAL_LLM_CLIENT, _GLOBAL_JUDGE_CLIENT
+    _GLOBAL_LLM_CLIENT = llm_client
+    _GLOBAL_JUDGE_CLIENT = judge_client
     
     logger.info(f"LLM client initialized: {args.llm_model}")
     logger.info(f"Judge client initialized: {args.judge_model}")

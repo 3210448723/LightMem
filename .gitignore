@@ -230,3 +230,4 @@ experiments/locomo/logs
 experiments/locomo/qdrant_post_update
 experiments/locomo/qdrant_pre_update
 experiments/locomo/qwenq
+experiments/locomo/lightmem_locomo_results/
