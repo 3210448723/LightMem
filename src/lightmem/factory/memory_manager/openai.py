@@ -1,4 +1,5 @@
 import concurrent
+import concurrent.futures  # 为类型检查器显式导入 futures 模块（不改变运行时行为）
 from collections import defaultdict
 from openai import OpenAI
 from typing import List, Dict, Optional, Literal, Any
@@ -11,12 +12,28 @@ from lightmem.memory.utils import clean_response
 model_name_context_windows = {
     "gpt-4o-mini": 128000,
     "qwen3-30b-a3b-instruct-2507": 128000,
+    "qwen2.5:3b": 32768,
+    "QwQ-32B": 131072,,
     "glm-4.6": 200000,
     "DEFAULT": 128000,  # Recommended default context window
 }
 
 
 class OpenaiManager:
+    """
+    基于 OpenAI/OpenRouter 接口的记忆管理器。
+
+    作用：
+    - 统一封装聊天补全调用（chat.completions），支持直接 OpenAI 或通过 OpenRouter 网关。
+    - 提供通用的响应解析逻辑（包含工具调用场景）。
+    - 提供元数据抽取（并行批处理）与更新决策调用的辅助方法。
+
+    配置说明（BaseMemoryManagerConfig）：
+    - model：模型名称或配置；若为空，默认 "gpt-4o-mini"。
+    - openai_base_url / openrouter_base_url：可选的自定义 API 基址。
+    - site_url / app_name / models / route：当使用 OpenRouter 时，可选的 headers 与路由参数。
+    - 其他采样参数（temperature、max_tokens、top_p 等）直接传递给 API。
+    """
     def __init__(self, config: BaseMemoryManagerConfig):
         self.config = config
 
@@ -24,16 +41,16 @@ class OpenaiManager:
             self.config.model = "gpt-4o-mini"
         
         if self.config.model in model_name_context_windows:
-            self.context_windows = model_name_context_windows[self.config.model]
+            self.context_windows = model_name_context_windows[self.config.model]  # type: ignore[index]
         else:
             self.context_windows = model_name_context_windows["DEFAULT"]
 
         http_client = httpx.Client(verify=False)
 
-        if os.environ.get("OPENROUTER_API_KEY"):  # Use OpenRouter
+        if os.environ.get("OPENROUTER_API_KEY"):  # 使用 OpenRouter
             self.client = OpenAI(
                 api_key=os.environ.get("OPENROUTER_API_KEY"),
-                base_url=self.config.openrouter_base_url
+                base_url=self.config.openrouter_base_url  # type: ignore[attr-defined]
                 or os.getenv("OPENROUTER_API_BASE")
                 or "https://openrouter.ai/api/v1",
             )
@@ -50,14 +67,14 @@ class OpenaiManager:
 
     def _parse_response(self, response, tools):
         """
-        Process the response based on whether tools are used or not.
+        根据是否使用了工具（tools）来处理模型返回：
 
-        Args:
-            response: The raw response from API.
-            tools: The list of tools provided in the request.
+        参数：
+            response：API 原始返回对象。
+            tools：请求中提供的工具列表。
 
-        Returns:
-            str or dict: The processed response.
+        返回：
+            str 或 dict：处理后的结果（若使用工具则返回包含工具调用信息的字典，否则返回纯文本）。
         """
         if tools:
             processed_response = {
@@ -86,16 +103,16 @@ class OpenaiManager:
         tool_choice: str = "auto",
     ) -> Optional[str]:
         """
-        Generate a response based on the given messages.
+    使用 OpenAI 接口基于给定消息生成回复。
 
-        Args:
-            messages (list): List of message dicts containing 'role' and 'content'.
-            response_format (str or object, optional): Format of the response. Defaults to "text".
-            tools (list, optional): List of tools that the model can call. Defaults to None.
-            tool_choice (str, optional): Tool choice method. Defaults to "auto".
+        参数：
+            messages (list)：消息列表（包含 'role' 与 'content'）。
+            response_format (str 或对象，可选)：响应格式，默认 "text"。
+            tools (list，可选)：可供模型调用的工具列表，默认 None。
+            tool_choice (str，可选)：工具选择方式，默认 "auto"。
 
-        Returns:
-            str: The generated response.
+        返回：
+            str：生成的回复内容（或在上层进一步解析）。
         """
         params = {
             "model": self.config.model,
@@ -110,15 +127,15 @@ class OpenaiManager:
             
             models = getattr(self.config, 'models', None)    
             route = getattr(self.config, 'route', 'fallback') 
-            if models:
-                openrouter_params["models"] = models
-                openrouter_params["route"] = route
+            if models:  # type: ignore[attr-defined]
+                openrouter_params["models"] = models  # type: ignore[attr-defined]
+                openrouter_params["route"] = route  # type: ignore[attr-defined]
                 params.pop("model")
 
-            if self.config.site_url and self.config.app_name:
+            if self.config.site_url and self.config.app_name:  # type: ignore[attr-defined]
                 extra_headers = {
-                    "HTTP-Referer": self.config.site_url,
-                    "X-Title": self.config.app_name,
+                    "HTTP-Referer": self.config.site_url,  # type: ignore[attr-defined]
+                    "X-Title": self.config.app_name,  # type: ignore[attr-defined]
                 }
                 openrouter_params["extra_headers"] = extra_headers
 
@@ -126,7 +143,7 @@ class OpenaiManager:
 
         if response_format:
             params["response_format"] = response_format
-        if tools:  # TODO: Remove tools if no issues found with new memory addition logic
+        if tools:  # TODO：如果新增的记忆添加逻辑稳定，可移除 tools 相关参数
             params["tools"] = tools
             params["tool_choice"] = tool_choice
 
@@ -143,23 +160,23 @@ class OpenaiManager:
     def meta_text_extract(
         self,
         extract_list: List[List[List[Dict]]],
-        messages_use: Literal["user_only", "assistant_only", "hybrid"] = "user_only",
+        allowed_roles: list[str] = ["user"],
         topic_id_mapping: Optional[List[List[int]]] = None,
         extraction_mode: Literal["flat", "event"] = "flat",
         custom_prompts: Optional[Dict[str, str]] = None  
     ) -> List[Optional[Dict]]:
         """
-        Extract metadata from text segments using parallel processing.
+    使用并行处理从文本片段中抽取元数据（事实）。
 
-        Args:
+        参数：
             extract_list: List of message segments to process
-            messages_use: Strategy for which messages to use
+            allowed_roles：参与拼接的消息角色列表。
             topic_id_mapping: For each API call, the global topic IDs
             extraction_mode: "flat" or "event"
             custom_prompts: Optional custom prompts. If None, use defaults from EXTRACTION_PROMPTS
 
-        Returns:
-            List of extracted metadata results, None for failed segments
+        返回：
+            List[Optional[Dict]]：每个 API 调用的抽取结果字典（失败为 None）。
         """
         if not extract_list:
             return []
@@ -175,7 +192,7 @@ class OpenaiManager:
             return self._extract_with_prompt(
                 system_prompt=prompts.get("factual", METADATA_GENERATE_PROMPT),
                 extract_list=extract_list,
-                messages_use=messages_use,
+                allowed_roles=allowed_roles,
                 topic_id_mapping=topic_id_mapping,
                 entry_type="factual"
             )
@@ -184,7 +201,7 @@ class OpenaiManager:
             factual_results = self._extract_with_prompt(
                 system_prompt=prompts["factual"],
                 extract_list=extract_list,
-                messages_use=messages_use,
+                allowed_roles=allowed_roles,
                 topic_id_mapping=topic_id_mapping,
                 entry_type="factual"
             )
@@ -192,7 +209,7 @@ class OpenaiManager:
             relational_results = self._extract_with_prompt(
                 system_prompt=prompts["relational"],
                 extract_list=extract_list,
-                messages_use=messages_use,
+                allowed_roles=allowed_roles,
                 topic_id_mapping=topic_id_mapping,
                 entry_type="relational"
             )
@@ -263,7 +280,7 @@ class OpenaiManager:
         self,
         system_prompt: str,
         extract_list: List[List[List[Dict]]],
-        messages_use: str,
+        allowed_roles: list[str],
         topic_id_mapping: Optional[List[List[int]]],
         entry_type: str = "factual"
     ) -> List[Optional[Dict]]:
@@ -271,25 +288,15 @@ class OpenaiManager:
         Args:
             system_prompt: System prompt for extraction
             extract_list: List of message segments
-            messages_use: Message filtering strategy
+            allowed_roles: Message filtering strategy
             topic_id_mapping: Global topic IDs
             entry_type: "factual" or "relational"
         
         Returns:
             List of extraction results
         """
-        def concatenate_messages(segment: List[Dict], messages_use: str) -> str:
+        def concatenate_messages(segment: List[Dict], allowed_roles: list[str]) -> str:
             """Concatenate messages based on usage strategy"""
-            role_filter = {
-                "user_only": {"user"},
-                "assistant_only": {"assistant"},
-                "hybrid": {"user", "assistant"}
-            }
-
-            if messages_use not in role_filter:
-                raise ValueError(f"Invalid messages_use value: {messages_use}")
-
-            allowed_roles = role_filter[messages_use]
             message_lines = []
 
             for mes in segment:
@@ -329,7 +336,7 @@ class OpenaiManager:
                     else:
                         global_topic_id = topic_idx + 1
                     
-                    topic_text = concatenate_messages(topic_segment, messages_use)
+                    topic_text = concatenate_messages(topic_segment, allowed_roles)
                     user_prompt_parts.append(f"--- Topic {global_topic_id} ---\n{topic_text}")
 
                 print(f"User prompt for API call {api_call_idx}:\n" + "\n".join(user_prompt_parts))
@@ -344,7 +351,7 @@ class OpenaiManager:
                     messages=metadata_messages,
                     response_format={"type": "json_object"},
                 )
-                metadata_facts = clean_response(raw_response)
+                metadata_facts = clean_response(raw_response)  # type: ignore[arg-type]
                 
                 for entry in metadata_facts:
                     entry["entry_type"] = entry_type
@@ -374,8 +381,8 @@ class OpenaiManager:
                 print(f"Error in parallel processing: {e}")
                 results = [None] * len(extract_list)
 
-        return results
-
+        return results  # type: ignore[return-value]
+    
     def _call_update_llm(self, system_prompt, target_entry, candidate_sources):
         target_memory = target_entry["payload"]["memory"]
         candidate_memories = [c["payload"]["memory"] for c in candidate_sources]
@@ -396,7 +403,7 @@ class OpenaiManager:
         )
         
         try:
-            result = json.loads(response_text)
+            result = json.loads(response_text)  # type: ignore[arg-type]
             if "action" not in result:
                 result = {"action": "ignore"}
             result["usage"] = usage_info  

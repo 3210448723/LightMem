@@ -1,3 +1,10 @@
+# 说明：
+# 本文件定义了用于大模型调用的提示词模板：
+# - METADATA_GENERATE_PROMPT：用于从分段后的对话消息中抽取用户相关的事实信息；
+# - UPDATE_PROMPT：用于离线更新阶段，决定目标记忆的“更新/删除/忽略”。
+#
+# 注意：不要修改字符串字面量内容，以免影响提示词效果；如需调整规则，请在上层配置中控制。
+
 METADATA_GENERATE_PROMPT = """
 You are a Personal Information Extractor. 
 Your task is to extract **all possible facts or information** about the user from a conversation, 

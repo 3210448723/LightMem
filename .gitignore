@@ -213,3 +213,16 @@ __marimo__/
 __pycache__/
 *.py[codz]
 *$py.class
+*.py[cod]
+*.py[cod]
+*.class
+.history
+**.egg-info/
+*.egg
+.vscode/
+experiments/qdrant_data/
+llmlingua-2-bert-base-multilingual-cased-meetingbank/
+dataset/
+results/
+results_locomo/
+results_longmemeval/
