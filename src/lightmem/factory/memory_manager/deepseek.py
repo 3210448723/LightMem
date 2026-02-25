@@ -6,11 +6,11 @@ from typing import List, Dict, Optional, Literal, Any
 
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.utils import clean_response
+from lightmem.utils.llm_cache import llm_cache
 
 
 class DeepseekManager:
     def __init__(self, config: BaseMemoryManagerConfig):
-        self.config = config
         """
         初始化 DeepSeek 风格的记忆管理器：
         - 使用 OpenAI 兼容接口；
@@ -18,11 +18,22 @@ class DeepseekManager:
         - 仅负责请求与响应解析，不修改业务字符串。
         注意：此文件当前实现可能依赖外部配置结构，请确保调用方传入的配置项完整。
         """
+        self.config = config
         if not self.config.model:
             self.config.model = "deepseek-chat"
         self.api_key = self.config.api_key
         self.base_url = (self.config.deepseek_base_url or "https://api.deepseek.com/v1").rstrip("/")
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    @llm_cache(key_prefix="deepseek_chat")
+    def _call_api(self, **params):
+        """
+        带缓存的底层 API 调用方法。
+        
+        参数相同时会命中缓存，无需重复请求。
+        报错的请求不会被缓存。
+        """
+        return self.client.chat.completions.create(**params)
 
     def _parse_response(self, response, tools):
         """
@@ -105,7 +116,7 @@ class DeepseekManager:
             params["tools"] = tools
             params["tool_choice"] = tool_choice
 
-        response = self.client.chat.completions.create(**params)
+        response = self._call_api(**params)
         str_response =self._parse_response(response, tools)
 
         return str_response

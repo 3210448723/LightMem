@@ -211,11 +211,12 @@ __marimo__/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
+<<<<<<<<< Temporary merge branch 1
+*.py[cod]
 *.py[codz]
+__pycache__/
+*.py[cod]
 *$py.class
-*.py[cod]
-*.py[cod]
-*.class
 .history
 **.egg-info/
 *.egg
@@ -226,3 +227,9 @@ dataset/
 results/
 results_locomo/
 results_longmemeval/
+
+experiments/locomo/logs
+experiments/locomo/qdrant_post_update
+experiments/locomo/qdrant_pre_update
+experiments/locomo/qwenq
+experiments/locomo/lightmem_locomo_results/

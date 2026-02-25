@@ -5,7 +5,7 @@ class ShortMemBufferManager:
     """
     短期记忆缓冲（聚合窗口）：
     - 接收由感觉记忆缓冲切分后的片段（segments）；
-    - 基于 messages_use（user_only/assistant_only/hybrid）对每个片段估算 token；
+    - 基于 allowed_roles 对每个片段估算 token；
     - 当累计超过阈值或 force_extract=True 时，将当前缓冲的片段作为一次“抽取批次”输出；
     - 上层据此调用大模型进行事实抽取（metadata/text summary）。
     """
@@ -14,6 +14,7 @@ class ShortMemBufferManager:
         self.tokenizer = resolve_tokenizer(tokenizer)
         self.buffer: List[List[Dict[str, Any]]] = [] 
         self.token_count: int = 0 
+        print(f"ShortMemBufferManager initialized with max_tokens={self.max_tokens}")
 
     def _count_tokens(self, messages: List[Dict[str, Any]], allowed_roles: list[str]) -> int:
         text_list = [msg["content"] for msg in messages if msg["role"] in allowed_roles]

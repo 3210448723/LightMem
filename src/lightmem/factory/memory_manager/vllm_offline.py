@@ -17,6 +17,7 @@ except ImportError:
 
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.utils import clean_response
+from lightmem.utils.llm_cache import llm_cache
 
 DEFAULT_MAX_MODEL_LEN = 128000
 
@@ -72,6 +73,17 @@ class VllmOfflineManager:
         else:
             return content
 
+    @llm_cache(key_prefix="vllm_offline_chat")
+    def _cached_generate(self,**params) -> Optional[str]:
+        """
+        带缓存的底层生成方法。
+        
+        参数相同时会命中缓存，无需重复计算。
+        报错的请求不会被缓存。
+        """
+        # 使用缓存方法调用
+        outputs = self.client.chat(params)
+
     def generate_response(
         self,
         messages: List[Dict[str, str]],
@@ -109,7 +121,7 @@ class VllmOfflineManager:
         else:
             think = True
 
-        outputs = self.client.chat(
+        outputs = self._cached_generate(
             [messages], 
             params,
             chat_template_kwargs={"enable_thinking": think},

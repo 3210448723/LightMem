@@ -7,6 +7,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.utils import clean_response
+from lightmem.utils.llm_cache import llm_cache
 
 
 class TransformersManager:
@@ -61,6 +62,17 @@ class TransformersManager:
         else:
             return content
 
+    @llm_cache(key_prefix="transformers_chat")
+    def _cached_generate(self, **params) -> Optional[str]:
+        """
+        带缓存的底层生成方法。
+        
+        参数相同时会命中缓存，无需重复计算。
+        报错的请求不会被缓存。
+        """
+        # 使用缓存方法调用
+        outputs = self.client.generate(**params)
+        
     def generate_response(
         self,
         messages: List[Dict[str, str]],
@@ -93,7 +105,7 @@ class TransformersManager:
         )
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.client.device)
 
-        outputs = self.client.generate(
+        outputs = self._cached_generate(
             **inputs,
             do_sample=params["do_sample"],
             temperature=params["temperature"],

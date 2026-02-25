@@ -8,6 +8,7 @@ import httpx
 from lightmem.memory.prompts import EXTRACTION_PROMPTS, METADATA_GENERATE_PROMPT
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.utils import clean_response
+from lightmem.utils.llm_cache import llm_cache
 
 model_name_context_windows = {
     "gpt-4o-mini": 128000,
@@ -64,6 +65,16 @@ class OpenaiManager:
             )
 
             self.client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+
+    @llm_cache(key_prefix="openai_chat")
+    def _call_api(self, **params):
+        """
+        带缓存的底层 API 调用方法。
+        
+        参数相同时会命中缓存，无需重复请求。
+        报错的请求不会被缓存。
+        """
+        return self.client.chat.completions.create(**params)
 
     def _parse_response(self, response, tools):
         """
@@ -147,7 +158,7 @@ class OpenaiManager:
             params["tools"] = tools
             params["tool_choice"] = tool_choice
 
-        response = self.client.chat.completions.create(**params)
+        response = self._call_api(**params)
         usage_info = {
             "prompt_tokens": response.usage.prompt_tokens,
             "completion_tokens": response.usage.completion_tokens,

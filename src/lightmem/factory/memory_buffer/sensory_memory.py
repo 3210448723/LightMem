@@ -35,6 +35,7 @@ class SenMemBufferManager:
 
         while self.big_buffer:
             processed_messages = []
+            processed_messages = []
             for msg in self.big_buffer:
                 if msg["role"] in allowed_roles:
                     cur_token_count = len(self.tokenizer.encode(msg["content"]))  # type: ignore[union-attr]
@@ -51,7 +52,6 @@ class SenMemBufferManager:
                     processed_messages.append(msg)
             for msg in processed_messages:
                 self.big_buffer.remove(msg)
-
         return all_segments  # type: ignore[return-value]
 
     def should_trigger(self) -> bool:
