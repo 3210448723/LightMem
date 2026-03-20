@@ -226,3 +226,5 @@ dataset/
 results/
 results_locomo/
 results_longmemeval/
+
+*.json

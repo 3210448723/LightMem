@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LoCoMo 对话轮次分割可视化</title>
+  <style>
+    :root {
+      --bg: #f5f7ef;
+      --panel: #ffffff;
+      --ink: #20251c;
+      --sub: #586152;
+      --line: #dce3cf;
+      --accent: #146356;
+      --accent-soft: #e4f4ef;
+      --alert: #b2472a;
+      --alert-soft: #f9e6de;
+      --segment-a: #eef6d3;
+      --segment-b: #d8f0f2;
+      --segment-c: #f9ebd6;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Noto Sans SC", "IBM Plex Sans", "Source Han Sans SC", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 10%, #dcecd8 0%, transparent 35%),
+        radial-gradient(circle at 90% 20%, #d4ebe2 0%, transparent 30%),
+        var(--bg);
+      min-height: 100vh;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 16px;
+      padding: 20px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      box-shadow: 0 10px 26px rgba(48, 66, 35, 0.08);
+    }
+
+    .left {
+      padding: 14px;
+      position: sticky;
+      top: 20px;
+      height: calc(100vh - 40px);
+      overflow: auto;
+    }
+
+    .right {
+      padding: 18px;
+      overflow: auto;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin: 0 0 4px;
+      letter-spacing: 0.2px;
+    }
+
+    .hint {
+      color: var(--sub);
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 0 0 10px;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .toolbar button,
+    .toolbar input,
+    .toolbar select {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      padding: 10px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 13px;
+    }
+
+    .toolbar button {
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .toolbar button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 7px 14px rgba(20, 99, 86, 0.22);
+    }
+
+    .list-box {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: auto;
+      max-height: 38vh;
+      background: #fcfdf9;
+    }
+
+    .item {
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+      font-size: 13px;
+    }
+
+    .item:last-child {
+      border-bottom: none;
+    }
+
+    .item.active {
+      background: var(--accent-soft);
+      border-left: 4px solid var(--accent);
+      padding-left: 6px;
+      font-weight: 600;
+    }
+
+    .headline {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .badge {
+      background: #ebf2e1;
+      border: 1px solid var(--line);
+      color: #334428;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin: 12px 0 18px;
+    }
+
+    .stat {
+      background: #f8fbf3;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+    }
+
+    .stat b {
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    .stat span {
+      color: var(--sub);
+      font-size: 12px;
+      display: block;
+      margin-top: 3px;
+    }
+
+    .section-title {
+      margin: 18px 0 10px;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .segments {
+      display: grid;
+      gap: 10px;
+    }
+
+    .segment {
+      border-radius: 12px;
+      padding: 10px;
+      border: 1px solid var(--line);
+    }
+
+    .segment:nth-child(3n + 1) { background: var(--segment-a); }
+    .segment:nth-child(3n + 2) { background: var(--segment-b); }
+    .segment:nth-child(3n + 3) { background: var(--segment-c); }
+
+    .timeline {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 8px;
+      background: #fff;
+    }
+
+    .turn {
+      border-radius: 10px;
+      border: 1px solid #e8ecdf;
+      padding: 10px;
+      margin: 8px 0;
+      background: #fcfdf9;
+      animation: fadeIn 0.25s ease both;
+    }
+
+    .turn .meta {
+      font-size: 12px;
+      color: var(--sub);
+      margin-bottom: 6px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .turn.boundary {
+      border-left: 6px solid var(--alert);
+      background: var(--alert-soft);
+    }
+
+    .boundary-note {
+      color: var(--alert);
+      font-weight: 700;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    canvas {
+      width: 100%;
+      height: 180px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    .empty {
+      color: var(--sub);
+      border: 1px dashed var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      background: #fbfcf8;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(2px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 960px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .left {
+        position: static;
+        height: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="left card">
+      <h1>轮次分割可视化</h1>
+      <p class="hint">用于检查 LoCoMo 会话中预测边界是否合理。先加载 JSON，再选择样本和会话。</p>
+
+      <div class="toolbar">
+        <input id="fileInput" type="file" accept="application/json" />
+        <button id="loadDemoBtn" type="button">尝试加载相对路径示例输出</button>
+      </div>
+
+      <p class="hint" id="metaText">尚未加载结果文件</p>
+
+      <div class="section-title">样本列表</div>
+      <div id="sampleList" class="list-box"></div>
+
+      <div class="section-title">会话列表</div>
+      <div id="sessionList" class="list-box"></div>
+    </aside>
+
+    <main class="right card">
+      <div id="mainView" class="empty">请先加载分割结果文件。</div>
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      data: null,
+      sampleIndex: 0,
+      sessionIndex: 0,
+    };
+
+    const fileInput = document.getElementById("fileInput");
+    const loadDemoBtn = document.getElementById("loadDemoBtn");
+    const sampleList = document.getElementById("sampleList");
+    const sessionList = document.getElementById("sessionList");
+    const mainView = document.getElementById("mainView");
+    const metaText = document.getElementById("metaText");
+
+    fileInput.addEventListener("change", async (ev) => {
+      const file = ev.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      const json = JSON.parse(text);
+      loadData(json);
+    });
+
+    loadDemoBtn.addEventListener("click", async () => {
+      try {
+        const resp = await fetch("./outputs/locomo_turn_segments.json");
+        if (!resp.ok) throw new Error("示例文件不存在或未通过 HTTP 服务访问");
+        const json = await resp.json();
+        loadData(json);
+      } catch (err) {
+        alert("加载失败：" + err.message + "。\n可用 python -m http.server 在当前目录启动本地服务。");
+      }
+    });
+
+    function loadData(json) {
+      if (!json || !Array.isArray(json.samples)) {
+        alert("文件结构不正确，缺少 samples 数组。");
+        return;
+      }
+      state.data = json;
+      state.sampleIndex = 0;
+      state.sessionIndex = 0;
+      renderMeta();
+      renderSampleList();
+      renderSessionList();
+      renderMain();
+    }
+
+    function renderMeta() {
+      const meta = state.data?.meta || {};
+      metaText.textContent = `已加载: ${meta.dataset || "unknown"} | 样本数: ${meta.num_samples_processed ?? "?"} | 模型: ${meta.embedding_model || "?"}`;
+    }
+
+    function renderSampleList() {
+      const samples = state.data?.samples || [];
+      sampleList.innerHTML = "";
+      if (!samples.length) {
+        sampleList.innerHTML = '<div class="item">无样本</div>';
+        return;
+      }
+
+      samples.forEach((s, idx) => {
+        const el = document.createElement("div");
+        el.className = "item" + (idx === state.sampleIndex ? " active" : "");
+        el.textContent = `${s.sample_id} (${s.num_sessions} sessions)`;
+        el.onclick = () => {
+          state.sampleIndex = idx;
+          state.sessionIndex = 0;
+          renderSampleList();
+          renderSessionList();
+          renderMain();
+        };
+        sampleList.appendChild(el);
+      });
+    }
+
+    function renderSessionList() {
+      const sample = getCurrentSample();
+      const sessions = sample?.sessions || [];
+      sessionList.innerHTML = "";
+      if (!sessions.length) {
+        sessionList.innerHTML = '<div class="item">无会话</div>';
+        return;
+      }
+
+      sessions.forEach((s, idx) => {
+        const el = document.createElement("div");
+        el.className = "item" + (idx === state.sessionIndex ? " active" : "");
+        el.textContent = `${s.session_id} | turns: ${s.num_turns}`;
+        el.onclick = () => {
+          state.sessionIndex = idx;
+          renderSessionList();
+          renderMain();
+        };
+        sessionList.appendChild(el);
+      });
+    }
+
+    function getCurrentSample() {
+      return state.data?.samples?.[state.sampleIndex] || null;
+    }
+
+    function getCurrentSession() {
+      const sample = getCurrentSample();
+      return sample?.sessions?.[state.sessionIndex] || null;
+    }
+
+    function drawScoreChart(canvas, scores, boundaries) {
+      const ctx = canvas.getContext("2d");
+      const width = canvas.width = canvas.clientWidth * devicePixelRatio;
+      const height = canvas.height = canvas.clientHeight * devicePixelRatio;
+      ctx.scale(devicePixelRatio, devicePixelRatio);
+
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+
+      if (!scores.length) {
+        ctx.fillStyle = "#586152";
+        ctx.font = "13px sans-serif";
+        ctx.fillText("当前会话 turn 数不足，无法绘制相邻分数", 12, 24);
+        return;
+      }
+
+      const values = scores.map((s) => s.dissimilarity);
+      const minV = Math.min(...values);
+      const maxV = Math.max(...values);
+      const span = Math.max(maxV - minV, 1e-6);
+
+      const pad = 24;
+      const innerW = w - pad * 2;
+      const innerH = h - pad * 2;
+
+      ctx.strokeStyle = "#dce3cf";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad, h - pad);
+      ctx.lineTo(w - pad, h - pad);
+      ctx.stroke();
+
+      ctx.strokeStyle = "#146356";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      values.forEach((v, i) => {
+        const x = pad + (i / Math.max(values.length - 1, 1)) * innerW;
+        const y = h - pad - ((v - minV) / span) * innerH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      ctx.fillStyle = "#146356";
+      values.forEach((v, i) => {
+        const x = pad + (i / Math.max(values.length - 1, 1)) * innerW;
+        const y = h - pad - ((v - minV) / span) * innerH;
+        ctx.beginPath();
+        ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.strokeStyle = "#b2472a";
+      ctx.lineWidth = 1.5;
+      boundaries.forEach((b) => {
+        const i = b.after_turn;
+        const x = pad + (i / Math.max(values.length - 1, 1)) * innerW;
+        ctx.beginPath();
+        ctx.moveTo(x, pad);
+        ctx.lineTo(x, h - pad);
+        ctx.stroke();
+      });
+    }
+
+    function renderMain() {
+      const sample = getCurrentSample();
+      const session = getCurrentSession();
+      if (!sample || !session) {
+        mainView.className = "empty";
+        mainView.textContent = "没有可显示的数据";
+        return;
+      }
+
+      const boundariesByTurn = new Map();
+      (session.boundaries || []).forEach((b) => boundariesByTurn.set(b.after_turn, b));
+
+      // 为每个左 turn 建立相似度映射
+      const adjacentScoresByLeftTurn = new Map();
+      (session.adjacent_scores || []).forEach((s) => adjacentScoresByLeftTurn.set(s.left_turn, s));
+
+      const segmentsHtml = (session.segments || []).map((seg) => {
+        const speakers = Object.entries(seg.speaker_distribution || {})
+          .map(([name, count]) => `${name}:${count}`)
+          .join(" | ");
+
+        return `
+          <div class="segment">
+            <div><b>Segment ${seg.segment_id}</b> | turn [${seg.turn_start}, ${seg.turn_end}) | ${seg.turn_count} turns</div>
+            <div class="hint">说话人分布: ${speakers || "-"}</div>
+            <div>${escapeHtml(seg.preview || "")}</div>
+          </div>
+        `;
+      }).join("");
+
+      const turnsHtml = (session.turns || []).map((t) => {
+      const boundary = boundariesByTurn.get(t.turn_index);
+      const adjacentScore = adjacentScoresByLeftTurn.get(t.turn_index);
+        
+      let similarityHtml = '';
+      if (adjacentScore) {
+            similarityHtml = `
+            <div style="margin-top: 6px; padding: 6px; background: #f0f4ee; border-radius: 6px; font-size: 12px; color: #486146;">
+                ↓ 到 turn ${adjacentScore.right_turn}: 
+                <b>相似度 ${Number(adjacentScore.similarity).toFixed(4)}</b> | 
+                不相似度 ${Number(adjacentScore.dissimilarity).toFixed(4)}
+            </div>
+            `;
+        }
+        
+      return `
+            <div class="turn ${boundary ? "boundary" : ""}">
+            <div class="meta">
+                <span>turn ${t.turn_index}</span>
+                <span>${escapeHtml(t.speaker || "Unknown")}</span>
+                <span>${escapeHtml(t.speaker_tag || "unknown")}</span>
+                ${t.dia_id ? `<span>dia_id: ${escapeHtml(String(t.dia_id))}</span>` : ""}
+            </div>
+            <div>${escapeHtml(t.text || "")}</div>
+            ${similarityHtml}
+            ${boundary ? `<div class="boundary-note">预测边界: after turn ${boundary.after_turn} | dissimilarity=${Number(boundary.dissimilarity).toFixed(4)}</div>` : ""}
+            </div>
+        `;
+        }).join("");
+
+      mainView.className = "";
+      mainView.innerHTML = `
+        <div class="headline">
+          <h2 style="margin:0;">${escapeHtml(sample.sample_id)} / ${escapeHtml(session.session_id)}</h2>
+          <span class="badge">时间: ${escapeHtml(session.timestamp || "")}</span>
+          <span class="badge">${escapeHtml(sample.speakers?.speaker_a || "Speaker_A")} vs ${escapeHtml(sample.speakers?.speaker_b || "Speaker_B")}</span>
+        </div>
+
+        <div class="stats">
+          <div class="stat"><b>${session.num_turns}</b><span>总 turn 数</span></div>
+          <div class="stat"><b>${(session.boundaries || []).length}</b><span>预测边界数</span></div>
+          <div class="stat"><b>${(session.segments || []).length}</b><span>分段数</span></div>
+          <div class="stat"><b>${avgSegmentLen(session)}</b><span>平均段长</span></div>
+        </div>
+
+        <div class="section-title">边界打分曲线（dissimilarity）</div>
+        <canvas id="scoreCanvas"></canvas>
+
+        <div class="section-title">分段摘要</div>
+        <div class="segments">${segmentsHtml || '<div class="empty">无分段</div>'}</div>
+
+        <div class="section-title">逐 turn 查看</div>
+        <div class="timeline">${turnsHtml || '<div class="empty">无 turn</div>'}</div>
+      `;
+
+      const canvas = document.getElementById("scoreCanvas");
+      drawScoreChart(canvas, session.adjacent_scores || [], session.boundaries || []);
+    }
+
+    function avgSegmentLen(session) {
+      const segments = session.segments || [];
+      if (!segments.length) return "0";
+      const total = segments.reduce((acc, s) => acc + (s.turn_count || 0), 0);
+      return (total / segments.length).toFixed(2);
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>

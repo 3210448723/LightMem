@@ -8,6 +8,29 @@ import logging
 from typing import List, Dict, Any, Optional
 import numpy as np
 import argparse
+from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from nltk.translate.meteor_score import meteor_score
+
+try:
+    import torch
+except Exception:
+    torch = None
+
+try:
+    from transformers import AutoModel, AutoTokenizer
+except Exception:
+    AutoModel = None
+    AutoTokenizer = None
+
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None
+
+try:
+    from rouge_score import rouge_scorer
+except Exception:
+    rouge_scorer = None
 
 from lightmem.factory.text_embedder.huggingface import TextEmbedderHuggingface
 from lightmem.factory.text_embedder.openai import TextEmbedderOpenAI
@@ -40,6 +63,200 @@ DEFAULT_QDRANT_DIR = './qdrant_pre_update'
 DEFAULT_EMBEDDING_MODEL_PATH = '/path/to/embedding-model'
 DEFAULT_RESULTS_DIR = './lightmem_locomo_results'
 DEFAULT_RETRIEVAL_LIMIT = 60
+DEFAULT_SBERT_METRIC_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
+DEFAULT_BERT_METRIC_MODEL = 'bert-base-uncased'
+
+
+# ============ Text Metrics ============
+
+_rouge_l_scorer = None
+_sbert_metric_model = None
+_bert_metric_model = None
+_bert_metric_tokenizer = None
+_metric_warned = set()
+
+
+def _warn_once(tag: str, message: str) -> None:
+    if tag in _metric_warned:
+        return
+    _metric_warned.add(tag)
+    logger.warning(message)
+
+
+def _tokenize_text(text: str) -> List[str]:
+    return str(text).strip().lower().split()
+
+
+def _lcs_length(a: List[str], b: List[str]) -> int:
+    if not a or not b:
+        return 0
+    m, n = len(a), len(b)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        ai = a[i - 1]
+        for j in range(1, n + 1):
+            if ai == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    return dp[m][n]
+
+
+def _compute_rouge(reference: str, prediction: str) -> float:
+    global _rouge_l_scorer
+    if rouge_scorer is not None:
+        if _rouge_l_scorer is None:
+            _rouge_l_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+        score = _rouge_l_scorer.score(reference, prediction)
+        return float(score['rougeL'].fmeasure)
+
+    ref_tokens = _tokenize_text(reference)
+    pred_tokens = _tokenize_text(prediction)
+    if not ref_tokens or not pred_tokens:
+        return 0.0
+    lcs = _lcs_length(ref_tokens, pred_tokens)
+    precision = lcs / max(len(pred_tokens), 1)
+    recall = lcs / max(len(ref_tokens), 1)
+    if precision + recall == 0:
+        return 0.0
+    return float((2 * precision * recall) / (precision + recall))
+
+
+def _compute_bleu(reference: str, prediction: str) -> float:
+    ref_tokens = _tokenize_text(reference)
+    pred_tokens = _tokenize_text(prediction)
+    if not ref_tokens or not pred_tokens:
+        return 0.0
+    smooth = SmoothingFunction().method1
+    return float(
+        sentence_bleu(
+            [ref_tokens],
+            pred_tokens,
+            weights=(1.0, 0.0, 0.0, 0.0),
+            smoothing_function=smooth,
+        )
+    )
+
+
+def _compute_meteor(reference: str, prediction: str) -> float:
+    ref_tokens = _tokenize_text(reference)
+    pred_tokens = _tokenize_text(prediction)
+    if not ref_tokens or not pred_tokens:
+        return 0.0
+    try:
+        return float(meteor_score([ref_tokens], pred_tokens))
+    except LookupError:
+        _warn_once(
+            'meteor_wordnet',
+            'METEOR requires NLTK resources (e.g., wordnet). Falling back to 0.0.',
+        )
+        return 0.0
+
+
+def _load_sbert_metric_model():
+    global _sbert_metric_model
+    if _sbert_metric_model is not None:
+        return _sbert_metric_model
+    if SentenceTransformer is None:
+        _warn_once('sbert_import', 'sentence-transformers is unavailable. SBERT metric will be 0.0.')
+        return None
+    try:
+        _sbert_metric_model = SentenceTransformer(DEFAULT_SBERT_METRIC_MODEL)
+    except Exception as e:
+        _warn_once('sbert_load', f'Failed to load SBERT metric model: {e}. SBERT metric will be 0.0.')
+        return None
+    return _sbert_metric_model
+
+
+def _compute_sbert(reference: str, prediction: str) -> float:
+    model = _load_sbert_metric_model()
+    if model is None:
+        return 0.0
+    ref = reference or ''
+    pred = prediction or ''
+    if not ref.strip() or not pred.strip():
+        return 0.0
+    emb = model.encode([ref, pred], normalize_embeddings=True)
+    return float(np.dot(emb[0], emb[1]))
+
+
+def _load_bert_metric_model():
+    global _bert_metric_model, _bert_metric_tokenizer
+    if _bert_metric_model is not None and _bert_metric_tokenizer is not None:
+        return _bert_metric_tokenizer, _bert_metric_model
+
+    if torch is None or AutoTokenizer is None or AutoModel is None:
+        _warn_once('bert_import', 'transformers/torch is unavailable. BERT metric will be 0.0.')
+        return None, None
+    try:
+        _bert_metric_tokenizer = AutoTokenizer.from_pretrained(DEFAULT_BERT_METRIC_MODEL)
+        _bert_metric_model = AutoModel.from_pretrained(DEFAULT_BERT_METRIC_MODEL)
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        _bert_metric_model.to(device)
+        _bert_metric_model.eval()
+    except Exception as e:
+        _warn_once('bert_load', f'Failed to load BERT metric model: {e}. BERT metric will be 0.0.')
+        return None, None
+    return _bert_metric_tokenizer, _bert_metric_model
+
+
+def _compute_bert(reference: str, prediction: str) -> float:
+    tokenizer, model = _load_bert_metric_model()
+    if tokenizer is None or model is None or torch is None:
+        return 0.0
+    ref = reference or ''
+    pred = prediction or ''
+    if not ref.strip() or not pred.strip():
+        return 0.0
+
+    device = next(model.parameters()).device
+    with torch.no_grad():
+        tokenized = tokenizer([ref, pred], padding=True, truncation=True, return_tensors='pt')
+        tokenized = {k: v.to(device) for k, v in tokenized.items()}
+        outputs = model(**tokenized)
+        hidden = outputs.last_hidden_state
+        mask = tokenized['attention_mask'].unsqueeze(-1).float()
+        pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-12)
+        pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
+        score = torch.sum(pooled[0] * pooled[1]).item()
+    return float(score)
+
+
+def compute_text_metrics(reference: str, prediction: str) -> Dict[str, float]:
+    metrics = {
+        'rouge': 0.0,
+        'bleu': 0.0,
+        'bert': 0.0,
+        'meteor': 0.0,
+        'sbert': 0.0,
+    }
+
+    try:
+        metrics['rouge'] = _compute_rouge(reference, prediction)
+    except Exception as e:
+        _warn_once('rouge_error', f'ROUGE metric failed: {e}.')
+
+    try:
+        metrics['bleu'] = _compute_bleu(reference, prediction)
+    except Exception as e:
+        _warn_once('bleu_error', f'BLEU metric failed: {e}.')
+
+    try:
+        metrics['bert'] = _compute_bert(reference, prediction)
+    except Exception as e:
+        _warn_once('bert_error', f'BERT metric failed: {e}.')
+
+    try:
+        metrics['meteor'] = _compute_meteor(reference, prediction)
+    except Exception as e:
+        _warn_once('meteor_error', f'METEOR metric failed: {e}.')
+
+    try:
+        metrics['sbert'] = _compute_sbert(reference, prediction)
+    except Exception as e:
+        _warn_once('sbert_error', f'SBERT metric failed: {e}.')
+
+    return metrics
 
 
 # ============ Dataset Parsing ============
@@ -503,6 +720,9 @@ def process_sample(
         except Exception as e:
             logger.error(f"[{sample_id}] Judge evaluation failed: {e}")
             metrics = {'judge_correct': 0, 'judge_response': ''}
+
+        text_metrics = compute_text_metrics(reference, generated_answer)
+        metrics.update(text_metrics)
         
         # Store results
         result_dict = {
@@ -705,31 +925,44 @@ def main():
     
     # Calculate aggregate metrics
     logger.info("\nCalculating aggregate metrics...")
-    category_scores = {}
-    total_scores = []
-    
+    category_scores: Dict[int, Dict[str, List[float]]] = {}
+    total_scores: Dict[str, List[float]] = {}
+
     for cat, m in zip(all_categories, all_metrics):
-        score = float(m.get('judge_correct', 0)) if isinstance(m, dict) else 0.0
-        total_scores.append(score)
-        category_scores.setdefault(int(cat), []).append(score)
+        if not isinstance(m, dict):
+            continue
+        cat_int = int(cat)
+        category_scores.setdefault(cat_int, {})
+
+        for metric_name, metric_value in m.items():
+            if isinstance(metric_value, (int, float, np.integer, np.floating)):
+                metric_float = float(metric_value)
+                if np.isnan(metric_float):
+                    continue
+                total_scores.setdefault(metric_name, []).append(metric_float)
+                category_scores[cat_int].setdefault(metric_name, []).append(metric_float)
     
     aggregate_results = {"overall": {}}
-    if total_scores:
-        aggregate_results["overall"]["judge_correct"] = {
-            "mean": float(np.mean(total_scores)),
-            "std": float(np.std(total_scores)),
-            "count": int(len(total_scores)),
-        }
-    
-    for cat in sorted(category_scores.keys()):
-        vals = category_scores[cat]
+    for metric_name, vals in sorted(total_scores.items()):
         if vals:
-            aggregate_results[f"category_{cat}"] = {
-                "judge_correct": {
-                    "mean": float(np.mean(vals)),
-                    "std": float(np.std(vals)),
-                    "count": int(len(vals)),
-                }
+            aggregate_results["overall"][metric_name] = {
+                "mean": float(np.mean(vals)),
+                "std": float(np.std(vals)),
+                "count": int(len(vals)),
+            }
+
+    for cat in sorted(category_scores.keys()):
+        metric_dict = category_scores[cat]
+        if not metric_dict:
+            continue
+        aggregate_results[f"category_{cat}"] = {}
+        for metric_name, vals in sorted(metric_dict.items()):
+            if not vals:
+                continue
+            aggregate_results[f"category_{cat}"][metric_name] = {
+                "mean": float(np.mean(vals)),
+                "std": float(np.std(vals)),
+                "count": int(len(vals)),
             }
     
     # Build config dict
