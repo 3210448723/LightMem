@@ -82,7 +82,6 @@ def assign_sequence_numbers_with_timestamps(extract_list, offset_ms: int = 500, 
     weekday_list = []
     speaker_list = []
     message_refs = []
-    
     for segments in extract_list:
         for seg in segments:
             for message in seg:
@@ -158,8 +157,6 @@ def save_memory_entries(memory_entries, file_path="memory_entries.json"):
         return {
             "id": entry.id,
             "time_stamp": entry.time_stamp,
-            "topic_id": entry.topic_id,
-            "topic_summary": entry.topic_summary,
             "category": entry.category,
             "subcategory": entry.subcategory,
             "memory_class": entry.memory_class,
@@ -194,13 +191,18 @@ def save_memory_entries(memory_entries, file_path="memory_entries.json"):
 # TODO：more support for any models
 def resolve_tokenizer(tokenizer_or_name: Union[str, Any]) -> Union[tiktoken.Encoding, Any]:
     """
-    Resolve the tokenizer for a given model name or tokenizer instance.
+    解析 tokenizer：
+    - 允许传入模型名字符串，根据内置映射解析到 tiktoken 的编码名；
+    - 暂不支持直接传自定义 tokenizer 对象（保持与当前调用方一致）。
+    - 未知模型名会抛出异常，提示更新映射表。
     """
-
+    if tokenizer_or_name is None:
+        raise ValueError("Tokenizer or model_name must be provided.")
+    
     # --- Case: already a tokenizer object (transformers local model) ---
     if isinstance(tokenizer_or_name, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         return tokenizer_or_name
-
+    
     # --- Case: OpenAI tiktoken model name ---
     try:
         return tiktoken.encoding_for_model(tokenizer_or_name)
@@ -217,6 +219,7 @@ def resolve_tokenizer(tokenizer_or_name: Union[str, Any]) -> Union[tiktoken.Enco
             return tiktoken.get_encoding(encoding_name)
 
     # --- Case: fallback ---
+    logger.warning(f"Unknown model_name '{tokenizer_or_name}', please update mapping.")
     return tiktoken.get_encoding("o200k_base")
 
 def convert_extraction_results_to_memory_entries(
@@ -250,10 +253,10 @@ def convert_extraction_results_to_memory_entries(
         for item in extracted_results
         if item and item.get("cleaned_result")
     ]
-
-    logger.info(f"[{call_id}] Extracted {len(extracted_memory_entry)} memory entries")
-    logger.debug(f"[{call_id}] Extracted memory entry sample: {json.dumps(extracted_memory_entry)}")
-
+    if logger:
+        logger.info(f"[{call_id}] Extracted {len(extracted_memory_entry)} memory entries")
+        logger.debug(f"[{call_id}] Extracted memory entry sample: {json.dumps(extracted_memory_entry)}")
+    # 7) 组装 MemoryEntry：将事实绑定时间戳/星期，以便后续检索/更新
     for batch_idx, topic_memory in enumerate(extracted_memory_entry):
         if not topic_memory:
             continue

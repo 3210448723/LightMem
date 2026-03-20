@@ -15,6 +15,7 @@ from typing import List, Dict, Optional, Literal, Any
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.prompts import EXTRACTION_PROMPTS, METADATA_GENERATE_PROMPT
 from lightmem.memory.utils import clean_response
+from lightmem.utils.llm_cache import llm_cache
 
 
 class VllmManager:
@@ -36,6 +37,16 @@ class VllmManager:
             self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         else:
             self.client = OpenAI(base_url=self.base_url)
+
+    @llm_cache(key_prefix="vllm_chat")
+    def _call_api(self, **params):
+        """
+        带缓存的底层 API 调用方法。
+        
+        参数相同时会命中缓存，无需重复请求。
+        报错的请求不会被缓存。
+        """
+        return self.client.chat.completions.create(**params)
 
     def _parse_response(self, response, tools):
         """
@@ -104,7 +115,7 @@ class VllmManager:
             params["tools"] = tools
             params["tool_choice"] = tool_choice
 
-        response = self.client.chat.completions.create(**params)
+        response = self._call_api(**params)
         usage_info = {
             "prompt_tokens": getattr(response.usage, "prompt_tokens", 0) if response.usage else 0,
             "completion_tokens": getattr(response.usage, "completion_tokens", 0) if response.usage else 0,

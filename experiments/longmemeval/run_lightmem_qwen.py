@@ -14,6 +14,9 @@ from lightmem.memory.lightmem import LightMemory
 API_KEY='sk-n5HTCSKC9XsLtn2zwAdBxaPxF7ubNWgAxwapGJ5Buxd24G80'
 # API_BASE_URL='http://127.0.0.1:11434/v1'
 API_BASE_URL='http://100.78.197.38:16868/'
+JUDGE_MODEL_API_KEY='sk-n5HTCSKC9XsLtn2zwAdBxaPxF7ubNWgAxwapGJ5Buxd24G80'
+# API_BASE_URL='http://127.0.0.1:11434/v1'
+JUDGE_MODEL_BASE_URL='http://100.78.197.38:16868/'
 # LLM_MODEL='qwen3-30b-a3b-instruct-2507'
 # LLM_MODEL='qwen2.5:3b'
 LLM_MODEL='QwQ-32B'  # 'qwen-plus'
@@ -72,6 +75,7 @@ def get_anscheck_prompt(task, question, answer, response, abstention=False):
             template = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
         elif task == 'knowledge-update':
+            # 知识更新任务的模板，关注更新后的答案
             # 知识更新任务的模板，关注更新后的答案
             template = "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.\n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
             prompt = template.format(question, answer, response)
@@ -209,7 +213,8 @@ def load_lightmem(collection_name):
             }
         },
         "update": "offline",
-        "judge_only": False,  # 当试验结果存在且打算只做评测时，启用此选项
+        "locomo_style": True if "locomo" in DATA_PATH else False, # Enable locomo specific processing,
+        "judge_only": True,  # 当试验结果存在且打算只做评测时，启用此选项
         "use_llm_judge": True,  # 是否启用 LLM 评测判定
     }
     if "judge_only" in config and config["judge_only"]:
@@ -308,6 +313,7 @@ for item in tqdm(data):
         else:
             response = "Yes"
 
+        correct = 1 if true_or_false(response) else 0  # 归一化为 0/1 指标
         correct = 1 if true_or_false(response) else 0  # 归一化为 0/1 指标
 
         save_data = {

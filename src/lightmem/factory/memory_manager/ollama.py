@@ -10,6 +10,7 @@ except ImportError:
 from lightmem.configs.memory_manager.base_config import BaseMemoryManagerConfig
 from lightmem.memory.prompts import EXTRACTION_PROMPTS, METADATA_GENERATE_PROMPT
 from lightmem.memory.utils import clean_response
+from lightmem.utils.llm_cache import llm_cache
 
 
 class OllamaManager:
@@ -20,6 +21,16 @@ class OllamaManager:
             raise ValueError("Ollama model is not specified. Refer to https://ollama.com/docs/models for available models.")
 
         self.client = ollama.Client(host=self.config.host or "http://localhost:11434")
+
+    @llm_cache(key_prefix="ollama_chat")
+    def _call_api(self, **params):
+        """
+        带缓存的底层 API 调用方法。
+        
+        参数相同时会命中缓存，无需重复请求。
+        报错的请求不会被缓存。
+        """
+        return self.client.chat(**params)
 
     def _parse_response(self, response, tools):
         """
@@ -91,7 +102,7 @@ class OllamaManager:
         if isinstance(response_format, dict) and response_format.get("type") == "json_object":
             ollama_response_format = "json"
 
-        completion = self.client.chat(
+        completion = self._call_api(
             model=self.config.model,
             messages=messages,
             format=ollama_response_format,

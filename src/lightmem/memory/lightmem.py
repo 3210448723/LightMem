@@ -227,7 +227,8 @@ class LightMemory:
         self.logger.info("Initializing memory manager")
         # 记忆管理器：调用大模型进行元数据生成与更新决策
         self.manager = MemoryManagerFactory.from_config(self.config.memory_manager)
-        # 短期记忆缓冲：聚合分段结果并根据策略触发抽取，TODO: 注意论文中不同模型使用的 th 参数不同
+        # 短期记忆缓冲：聚合分段结果并根据策略触发抽取
+        # TODO : 根据论文，locomo gpt最优是 0.8,768，qwen最优是 0.8,1024；logmemeval gpt最优是 r=0.7, th=512，qwen最优是 r=0.6, th=768
         self.shortmem_buffer_manager = ShortMemBufferManager(max_tokens = 512, tokenizer=getattr(self.manager, "tokenizer", self.manager.config.model))
         if self.config.index_strategy == 'embedding' or self.config.index_strategy == 'hybrid':
             self.logger.info("Initializing text embedder")
@@ -319,6 +320,9 @@ class LightMemory:
               weekdays, and extracted factual content.
             - Depending on `self.config.update`, the function triggers either online or offline memory updates.
         """
+        if METADATA_GENERATE_PROMPT is None:
+            from lightmem.memory.prompts import METADATA_GENERATE_PROMPT as DEFAULT_PROMPT
+            METADATA_GENERATE_PROMPT = DEFAULT_PROMPT
         extract_prompts = normalize_extraction_prompts(
             prompts=METADATA_GENERATE_PROMPT,
             extraction_mode=self.config.extraction_mode,
@@ -375,7 +379,7 @@ class LightMemory:
                 "carryover_size": 0,
             }
 
-        # 4) 感觉记忆缓冲：接收消息+分段器/嵌入器，返回片段列表
+        # 4) 感觉记忆缓冲：接收消息+分段器/嵌入器，返回片段列表（该缓冲大小不会影响性能）
         all_segments = self.senmem_buffer_manager.add_messages(compressed_messages, self.segmenter, self.text_embedder, self.allowed_roles)
 
         if force_segment:
@@ -389,7 +393,7 @@ class LightMemory:
         self.logger.info(f"[{call_id}] Generated {len(all_segments)} segments")
         self.logger.debug(f"[{call_id}] Segments sample: {json.dumps(all_segments)}")
 
-        # 5) 短期记忆缓冲：根据策略/阈值触发抽取，将片段汇总成序列化的消息集合
+        # 5) 短期记忆缓冲：根据策略/阈值触发抽取，将片段汇总成序列化的消息集合（该缓冲大小会影响性能）
         extract_trigger_num, extract_list = self.shortmem_buffer_manager.add_segments(
             all_segments,
             self.allowed_roles,  # 确保传入非 None，默认优先抽取用户侧
@@ -446,7 +450,7 @@ class LightMemory:
             speaker_list=speaker_list,
             topic_id_map=topic_id_map,
             max_source_ids=max_source_ids,
-            logger=self.logger
+            logger=self.logger,
             call_id=call_id
         )
         self.logger.info(f"[{call_id}] Created {len(memory_entries)} MemoryEntry objects")
